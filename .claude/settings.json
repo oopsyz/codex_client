@@ -8,7 +8,12 @@
       "Bash(python C:/Users/yangz/.codex/skills/codex-ws-client/scripts/codex_ws_client.py*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:api.github.com)"
+      "WebFetch(domain:api.github.com)",
+      "Bash(cp -r c:/Projects/codex_client/skills/brainstorm c:/Projects/codex_client/.claude/skills/brainstorm)",
+      "Bash(cp -r c:/Projects/codex_client/skills/codex-ws-client c:/Projects/codex_client/.claude/skills/codex-ws-client)",
+      "Bash(mkdir -p c:/Projects/codex_client/.claude/skills)",
+      "Bash(cp -r c:/Projects/codex_client/skills/brainstorm c:/Projects/codex_client/.claude/skills/)",
+      "Bash(cp -r c:/Projects/codex_client/skills/codex-ws-client c:/Projects/codex_client/.claude/skills/)"
     ],
     "additionalDirectories": [
       "C:\\Users\\yangz\\.codex\\skills\\codex-ws-client",
