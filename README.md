@@ -10,6 +10,12 @@ The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
 
 The primary use case is running it inside Claude Code so Claude models can collaborate with Codex through a live `codex app-server` connection.
 
+## Demo
+
+<video src="brainstorm.mp4" controls muted playsinline></video>
+
+If inline playback is unavailable, open [brainstorm.mp4](brainstorm.mp4) directly.
+
 It is intended for agents or scripts that need to:
 
 - send a prompt to a running Codex app-server
