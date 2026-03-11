@@ -1,4 +1,4 @@
-# codex_client
+# Claude 与 Codex 协同 Brainstorm
 
 [English](README.md)
 
@@ -317,3 +317,9 @@ codex app-server --listen ws://127.0.0.1:8765
 ```
 
 然后再使用本客户端。
+
+## 问题与贡献
+
+如果你遇到缺陷，请在 issue 中附上你运行的命令、预期行为、实际行为，以及相关的 stderr 或 NDJSON 跟踪输出。
+
+欢迎贡献。请保持改动聚焦；当行为发生变化时同步更新文档；并在 pull request 中附上验证步骤或复现说明。
