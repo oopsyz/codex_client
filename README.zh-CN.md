@@ -12,7 +12,7 @@
 
 ## 演示
 
-https://github.com/user-attachments/assets/2c8af159-df13-4d09-ae32-cb2a96eb1fe7
+<https://github.com/user-attachments/assets/2c8af159-df13-4d09-ae32-cb2a96eb1fe7>
 
 如果无法内联播放，请直接打开 [brainstorm.mp4](brainstorm.mp4)。
 

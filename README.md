@@ -15,7 +15,7 @@ The primary use case is running it inside Claude Code so Claude models can colla
 
 
 
-https://github.com/user-attachments/assets/2c8af159-df13-4d09-ae32-cb2a96eb1fe7
+<https://github.com/user-attachments/assets/2c8af159-df13-4d09-ae32-cb2a96eb1fe7>
 
 
 If inline playback is unavailable, open [brainstorm.mp4](brainstorm.mp4) directly.
