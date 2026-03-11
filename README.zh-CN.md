@@ -10,6 +10,12 @@
 
 它的首要使用场景是在 Claude Code 中运行，让 Claude 模型通过一个持续连接的 `codex app-server` 与 Codex 协作。
 
+## 演示
+
+https://github.com/user-attachments/assets/2c8af159-df13-4d09-ae32-cb2a96eb1fe7
+
+如果无法内联播放，请直接打开 [brainstorm.mp4](brainstorm.mp4)。
+
 它适用于需要完成以下任务的代理或脚本：
 
 - 向正在运行的 Codex app-server 发送提示词
