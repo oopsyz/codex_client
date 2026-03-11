@@ -1,8 +1,12 @@
 # codex_client
 
+[中文说明](README.zh-CN.md)
+
 This repository contains `codex_ws_client.py`, a lightweight client for `codex app-server` over WebSocket.
 
 The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
+
+The primary use case is running it inside Claude Code so Claude models can collaborate with Codex through a live `codex app-server` connection.
 
 It is intended for agents or scripts that need to:
 
@@ -17,6 +21,7 @@ It is intended for agents or scripts that need to:
 
 Use this script when:
 
+- you want Claude Code to delegate work to Codex or continue a shared Codex thread
 - a long-lived `codex app-server` is already running
 - you want lower overhead than spawning `codex exec` for every turn
 - you want direct control over thread ids, timeouts, JSON output, and logging

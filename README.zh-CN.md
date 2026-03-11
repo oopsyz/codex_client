@@ -1,8 +1,12 @@
 # codex_client
 
+[English](README.md)
+
 本仓库包含 `codex_ws_client.py`，这是一个通过 WebSocket 连接 `codex app-server` 的轻量级客户端。
 
 脚本位于 `skills/codex-ws-client/scripts/codex_ws_client.py`。
+
+它的首要使用场景是在 Claude Code 中运行，让 Claude 模型通过一个持续连接的 `codex app-server` 与 Codex 协作。
 
 它适用于需要完成以下任务的代理或脚本：
 
@@ -17,6 +21,7 @@
 
 在以下情况下使用这个脚本：
 
+- 你希望 Claude Code 将任务委托给 Codex，或继续使用同一个 Codex 线程
 - 已经有一个长期运行的 `codex app-server`
 - 你希望比每次都启动 `codex exec` 拥有更低的开销
 - 你希望直接控制线程 ID、超时、JSON 输出和日志
