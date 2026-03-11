@@ -5,7 +5,10 @@
       "Read(//c/Users/yangz/.codex/skills/**)",
       "Bash(python skills/codex-ws-client/scripts/codex_ws_client.py*)",
       "Bash(python .codex/skills/codex-ws-client/scripts/codex_ws_client.py*)",
-      "Bash(python C:/Users/yangz/.codex/skills/codex-ws-client/scripts/codex_ws_client.py*)"
+      "Bash(python C:/Users/yangz/.codex/skills/codex-ws-client/scripts/codex_ws_client.py*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)"
     ],
     "additionalDirectories": [
       "C:\\Users\\yangz\\.codex\\skills\\codex-ws-client",
