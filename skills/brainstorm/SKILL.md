@@ -16,6 +16,10 @@ The commands below use the project-local path. Replace `.codex/` with `~/.codex/
 
 ## How to run a brainstorm
 
+### Step 0 — Ask how many rounds
+
+Before starting, ask the user how many discussion rounds they want. Default is **3** if they don't specify or just want to get going.
+
 ### Step 1 — Open the topic
 
 Send the opening prompt to Codex. Ask for its honest, direct take.
@@ -55,16 +59,36 @@ result=$(python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json 
 codex_response=$(echo "$result" | python -c "import json,sys; print(json.load(sys.stdin)['text'])")
 ```
 
-### Step 4 — Repeat for 3–5 rounds
+### Step 4 — Repeat for the agreed number of rounds
 
-Continue: Codex responds → Claude analyzes → Claude pushes back or builds → send. Each round should go deeper, not broader. Drop topics that have been exhausted; press harder on the most interesting disagreements.
+Continue: Codex responds → Claude analyzes → Claude pushes back or builds → send. Each round should go deeper, not broader. Drop topics that have been exhausted; press harder on the most interesting disagreements. Stop after the number of rounds agreed in Step 0.
 
-### Step 5 — Wrap up
+### Step 5 — Draw conclusions
 
-After the final round, Claude synthesizes:
-- The 2–3 strongest insights from the whole conversation
-- The key remaining disagreement or open question
-- One concrete takeaway or recommendation
+After the final discussion round, both sides independently form their conclusions.
+
+**Claude's conclusion:** Claude writes its own conclusion first — the 2–3 strongest insights, the key remaining disagreement, and one concrete takeaway or recommendation.
+
+**Codex's conclusion:** Then ask Codex for its conclusion on the same thread:
+
+```bash
+result=$(python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --thread-id "$thread_id" "We've had a good discussion. Now give me your final conclusion: summarize the 2-3 strongest insights from our conversation, the key remaining disagreement or open question, and one concrete takeaway or recommendation.")
+codex_conclusion=$(echo "$result" | python -c "import json,sys; print(json.load(sys.stdin)['text'])")
+```
+
+### Step 6 — Present conclusions side by side
+
+Present both conclusions to the user in a clear side-by-side format:
+
+```
+## Conclusions
+
+| Claude | Codex |
+|--------|-------|
+| <Claude's conclusion> | <Codex's conclusion> |
+```
+
+Use a two-column table or two clearly labeled sections so the user can easily compare perspectives and see where the two AIs converge and diverge.
 
 ## Tone and behavior
 
