@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/yangz/.claude/**)",
+      "Read(//c/Users/yangz/.codex/skills/**)",
+      "Bash(python skills/codex-ws-client/scripts/codex_ws_client.py*)",
+      "Bash(python .codex/skills/codex-ws-client/scripts/codex_ws_client.py*)",
+      "Bash(python C:/Users/yangz/.codex/skills/codex-ws-client/scripts/codex_ws_client.py*)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\yangz\\.codex\\skills\\codex-ws-client",
+      "C:\\Users\\yangz\\.codex\\skills\\brainstorm"
+    ]
+  }
+}

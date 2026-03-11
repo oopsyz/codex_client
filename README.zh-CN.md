@@ -2,6 +2,8 @@
 
 [English](README.md)
 
+许可证：[MIT](LICENSE)
+
 本仓库包含 `codex_ws_client.py`，这是一个通过 WebSocket 连接 `codex app-server` 的轻量级客户端。
 
 脚本位于 `skills/codex-ws-client/scripts/codex_ws_client.py`。
@@ -16,6 +18,30 @@
 - 获取机器可读的 JSON 输出
 - 在同一连接上通过 REPL 模式反复发送提示
 - 通过 stderr 日志或 NDJSON 跟踪查看更多服务端行为
+
+## 作为 Skill 安装
+
+这个仓库已经将客户端按 skill 目录结构打包在 `skills/codex-ws-client/` 下。
+
+项目级安装（仅对当前项目可用）：
+
+```powershell
+Copy-Item -Recurse -Force skills/codex-ws-client .codex/skills/codex-ws-client
+```
+
+全局安装（对所有项目可用）：
+
+```powershell
+Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-client
+```
+
+项目级安装后，从对应路径运行客户端：
+
+```powershell
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "Summarize this repo"
+```
+
+全局安装后，改用 `$HOME/.codex/skills/codex-ws-client/scripts/codex_ws_client.py`。
 
 ## 适用场景
 

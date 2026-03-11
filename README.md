@@ -2,6 +2,8 @@
 
 [中文说明](README.zh-CN.md)
 
+License: [MIT](LICENSE)
+
 This repository contains `codex_ws_client.py`, a lightweight client for `codex app-server` over WebSocket.
 
 The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
@@ -16,6 +18,30 @@ It is intended for agents or scripts that need to:
 - get machine-readable JSON output
 - use REPL mode for repeated prompts on one connection
 - inspect richer server behavior through stderr logs or NDJSON traces
+
+## Install As A Skill
+
+This repo already packages the client as a skill at `skills/codex-ws-client/`.
+
+To install project-locally (skill available only in this project):
+
+```powershell
+Copy-Item -Recurse -Force skills/codex-ws-client .codex/skills/codex-ws-client
+```
+
+To install globally (skill available across all projects):
+
+```powershell
+Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-client
+```
+
+After a project-local install, run the client from that path:
+
+```powershell
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "Summarize this repo"
+```
+
+After a global install, use `$HOME/.codex/skills/codex-ws-client/scripts/codex_ws_client.py` instead.
 
 ## When To Use It
 
