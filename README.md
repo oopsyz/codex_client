@@ -53,6 +53,13 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "Summariz
 
 After a global install, use `$HOME/.codex/skills/codex-ws-client/scripts/codex_ws_client.py` instead.
 
+Claude CLI sibling client:
+
+```powershell
+Copy-Item -Recurse -Force skills/claude-cli-client .codex/skills/claude-cli-client
+python .codex/skills/claude-cli-client/scripts/claude_cli_client.py --json "Summarize this repo"
+```
+
 ## When To Use It
 
 Use this script when:
@@ -327,3 +334,4 @@ running before using it.
 If you hit a bug, open an issue with the command you ran, the expected behavior, the actual behavior, and any relevant stderr or NDJSON trace output.
 
 Contributions are welcome. Keep changes focused, update documentation when behavior changes, and include validation steps or reproduction notes in the pull request.
+
