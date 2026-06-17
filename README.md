@@ -4,7 +4,7 @@
 
 License: [MIT](LICENSE)
 
-This repository contains `codex_ws_client.py`, a lightweight client for `codex app-server` over WebSocket.
+This repository contains `codex_ws_client.py`, a single-file lightweight client for `codex app-server` over WebSocket.
 
 The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
 

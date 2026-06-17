@@ -4,7 +4,7 @@
 
 许可证：[MIT](LICENSE)
 
-本仓库包含 `codex_ws_client.py`，这是一个通过 WebSocket 连接 `codex app-server` 的轻量级客户端。
+本仓库包含 `codex_ws_client.py`，这是一个通过 WebSocket 连接 `codex app-server` 的单文件轻量级客户端。
 
 脚本位于 `skills/codex-ws-client/scripts/codex_ws_client.py`。
 

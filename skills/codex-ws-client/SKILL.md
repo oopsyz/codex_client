@@ -1,11 +1,11 @@
 ---
 name: codex-ws-client
-description: Use this skill when working with the bundled `scripts/codex_ws_client.py` WebSocket client for `codex app-server`, including sending prompts, REPL use, resumed threads, JSON output, approval handling, tracing, or debugging Codex app-server protocol behavior.
+description: Use this skill when working with the bundled single-file `scripts/codex_ws_client.py` WebSocket client for `codex app-server`, including sending prompts, REPL use, resumed threads, JSON output, approval handling, tracing, or debugging Codex app-server protocol behavior.
 ---
 
 # Codex WS Client
 
-Use the bundled script at `scripts/codex_ws_client.py` as the local client for `codex app-server` over WebSocket.
+Use the bundled single-file script at `scripts/codex_ws_client.py` as the local client for `codex app-server` over WebSocket.
 
 ## Core workflow
 

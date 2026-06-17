@@ -1,6 +1,6 @@
 # codex_ws_client.py Reference
 
-This skill bundles `scripts/codex_ws_client.py`, a lightweight client for `codex app-server` over WebSocket.
+This skill bundles `scripts/codex_ws_client.py`, a single-file lightweight client for `codex app-server` over WebSocket.
 
 ## Use cases
 

@@ -46,23 +46,24 @@ Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-cl
 
 ## Architecture
 
-**Single-file implementation:** All logic lives in `skills/codex-ws-client/scripts/codex_ws_client.py` (~1,300 lines). There are no local module imports.
+**Single-file implementation:** All logic lives in `skills/codex-ws-client/scripts/codex_ws_client.py` (about 650 lines). There are no local module imports.
 
 **Protocol flow:**
 
 1. WebSocket connect to `ws://127.0.0.1:8765` (configurable via `--uri`)
 2. JSON-RPC `initialize` + `initialized` handshake
 3. `thread/start` (new) or `thread/resume` (existing via `--thread-id`)
-4. `turn/start` with the prompt — stream deltas from server
+4. `turn/start` with the prompt - stream deltas from server
 5. Handle server requests (approvals, elicitations) inline; auto-decline by default
 
 **Key async functions:**
 
-- `run_client()` — top-level entry, manages connection lifecycle
-- `run_turn()` — sends one prompt, streams response
-- `ensure_thread()` — creates or resumes a thread
-- `rpc_request()` — generic JSON-RPC call with response matching
-- `handle_server_request()` — processes approval/elicitation requests mid-stream
+- `main()` - top-level CLI entry point
+- `run_client()` - manages connection lifecycle
+- `run_turn()` - sends one prompt, streams response
+- `ensure_thread()` - creates or resumes a thread
+- `ProtocolClient.request()` - generic JSON-RPC call with response matching
+- `default_server_request_handler()` - processes approval/elicitation requests mid-stream
 
 **Output modes:** streaming text (default), buffered (`--no-stream`), structured JSON (`--json`), NDJSON trace log (`--ndjson-file`).
 
