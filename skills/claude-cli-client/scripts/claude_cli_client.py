@@ -2,9 +2,11 @@
 
 import argparse
 import json
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 from time import perf_counter
@@ -238,6 +240,21 @@ def maybe_handle_permission_denial(
             print(f"[permissions] denials={len(denials)}", file=sys.stderr)
 
 
+def start_stream_reader(stream: Any) -> tuple[queue.Queue[str | None], threading.Thread]:
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def _reader() -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    return lines, thread
+
+
 def run_turn(
     args: argparse.Namespace,
     cwd: str,
@@ -283,17 +300,25 @@ def run_turn(
 
     try:
         assert process.stdout is not None
+        stdout_queue, _stdout_thread = start_stream_reader(process.stdout)
         while True:
-            if timeout is not None and (perf_counter() - turn_start_time) > timeout:
+            remaining: float | None = None
+            if timeout is not None:
+                remaining = timeout - (perf_counter() - turn_start_time)
+                if remaining <= 0:
+                    process.kill()
+                    print(f"Timed out waiting for Claude CLI output (timeout={timeout}s).", file=sys.stderr)
+                    return EXIT_TIMEOUT, None, session_seen
+
+            try:
+                line = stdout_queue.get(timeout=remaining)
+            except queue.Empty:
                 process.kill()
                 print(f"Timed out waiting for Claude CLI output (timeout={timeout}s).", file=sys.stderr)
                 return EXIT_TIMEOUT, None, session_seen
 
-            line = process.stdout.readline()
-            if not line:
-                if process.poll() is not None:
-                    break
-                continue
+            if line is None:
+                break
             line = line.rstrip("\r\n")
             if not line:
                 continue
@@ -440,9 +465,6 @@ def run_turn(
         safe_print(completed_text)
     elif completed_text:
         safe_print()
-    else:
-        print("\nNo assistant text returned.", file=sys.stderr)
-        return EXIT_TURN_FAILURE, None, session_seen
     return EXIT_SUCCESS, None, session_seen
 
 

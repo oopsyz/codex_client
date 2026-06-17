@@ -50,6 +50,10 @@ _ndjson_file = None
 _interactive_approvals_enabled = False
 
 
+class ProtocolParseError(RuntimeError):
+    """Raised when the server sends malformed JSON-RPC payloads."""
+
+
 def open_ndjson(path: str) -> None:
     global _ndjson_file
     _ndjson_file = open(path, "a", encoding="utf-8")
@@ -295,7 +299,10 @@ async def recv_json(
             log_rpc(verbosity, "<<pending", msg)
         else:
             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ProtocolParseError(f"Failed to parse server message as JSON: {exc}") from exc
             log_rpc(verbosity, "<<", msg)
             write_ndjson("recv", msg, msg.get("params", {}).get("turnId", ""))
         if await handle_server_request(ws, msg, verbosity):
@@ -333,7 +340,10 @@ async def rpc_request(
     # Read from wire until we get our response.
     while True:
         raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
-        message = json.loads(raw)
+        try:
+            message = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ProtocolParseError(f"Failed to parse server message as JSON: {exc}") from exc
         log_rpc(verbosity, "<<", message)
         write_ndjson("recv", message)
         if await handle_server_request(ws, message, verbosity):
@@ -869,9 +879,6 @@ async def run_turn(
         safe_print(final_text)
     elif final_text:
         safe_print()
-    else:
-        print("\nNo assistant text returned.", file=sys.stderr)
-        return EXIT_TURN_FAILURE, None
     return EXIT_SUCCESS, None
 
 
@@ -1116,6 +1123,9 @@ async def run_client(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"Network error: {exc}", file=sys.stderr)
         return EXIT_CONNECTION_FAILURE
+    except ProtocolParseError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_PARSE_ERROR
     except RuntimeError as exc:
         if "Local stdout encoding failed" in str(exc):
             print(str(exc), file=sys.stderr)
@@ -1156,15 +1166,15 @@ def parse_args() -> argparse.Namespace:
             "  -vv  Raw JSON-RPC messages to stderr\n"
             "\n"
             "Examples:\n"
-            '  python send_jsonrpc.py "Summarize this repo"\n'
-            '  python send_jsonrpc.py --header "Authorization: Bearer tok" "List files"\n'
-            '  python send_jsonrpc.py --prompt-file prompt.txt\n'
-            '  echo "Explain this" | python send_jsonrpc.py --prompt-file -\n'
-            '  python send_jsonrpc.py --json --summary "Return metadata"\n'
-            '  python send_jsonrpc.py --ndjson-file trace.jsonl "Debug this"\n'
-            '  python send_jsonrpc.py --out response.txt "Write a poem"\n'
-            "  python send_jsonrpc.py --repl --print-thread-id\n"
-            '  python send_jsonrpc.py --thread-id THREAD_ID "Continue the previous conversation"\n'
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py "Summarize this repo"\n'
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py --header "Authorization: Bearer tok" "List files"\n'
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py --prompt-file prompt.txt\n'
+            '  echo "Explain this" | python skills/codex-ws-client/scripts/codex_ws_client.py --prompt-file -\n'
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py --json --summary "Return metadata"\n'
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py --ndjson-file trace.jsonl "Debug this"\n'
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py --out response.txt "Write a poem"\n'
+            "  python skills/codex-ws-client/scripts/codex_ws_client.py --repl --print-thread-id\n"
+            '  python skills/codex-ws-client/scripts/codex_ws_client.py --thread-id THREAD_ID "Continue the previous conversation"\n'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

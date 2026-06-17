@@ -24,3 +24,5 @@ venv.bak/
 Thumbs.db
 .claude/settings.json
 .claude/settings.*
+*.pyc
+*/__pycache__
