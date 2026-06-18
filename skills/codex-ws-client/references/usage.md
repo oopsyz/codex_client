@@ -41,6 +41,12 @@ It handles:
 Fresh thread:
 - omit `--thread-id`
 
+Model selection:
+- `--model` overrides the configured model
+- if `--model` is omitted, the client reads project `.codex/config.toml` files first
+- user `~/.codex/config.toml` is the fallback if no project model is set
+- if the config does not define a model, the client falls back to its built-in default
+
 Persisted thread:
 - default creation mode persists threads
 - reuse with `--thread-id`

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ast
 import atexit
 import argparse
 import asyncio
 import inspect
 import json
+import os
 import random
 import signal
 import sys
@@ -63,6 +65,108 @@ def safe_print(*args: Any, **kwargs: Any) -> None:
         print(*args, **kwargs)
     except UnicodeEncodeError as exc:
         raise RuntimeError("Local stdout encoding failed while printing assistant output. Configure stdout for UTF-8.") from exc
+
+
+def _codex_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _strip_toml_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    escape = False
+    for idx, char in enumerate(line):
+        if in_double:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_double = False
+            continue
+        if in_single:
+            if char == "'":
+                in_single = False
+            continue
+        if char == "#":
+            return line[:idx]
+        if char == '"':
+            in_double = True
+        elif char == "'":
+            in_single = True
+    return line
+
+
+def _parse_codex_model_from_config(path: Path) -> str:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    for raw_line in content.splitlines():
+        line = _strip_toml_comment(raw_line).strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            break
+        key, sep, value = line.partition("=")
+        if key.strip() != "model" or not sep:
+            continue
+        value = value.strip()
+        if not value:
+            continue
+        if value[:1] in {'"', "'"}:
+            try:
+                parsed = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(parsed, str) and parsed.strip():
+                return parsed.strip()
+            continue
+        return value.split()[0]
+    return ""
+
+
+def _find_git_root(start: Path) -> Path | None:
+    current = start.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _iter_project_config_paths(workspace_dir: Path) -> list[Path]:
+    current = workspace_dir.resolve()
+    root = _find_git_root(current) or current
+    lineage: list[Path] = []
+    while True:
+        lineage.append(current)
+        if current == root or current.parent == current:
+            break
+        current = current.parent
+    configs: list[Path] = []
+    for candidate in reversed(lineage):
+        config = candidate / ".codex" / "config.toml"
+        if config.exists():
+            configs.append(config)
+    return configs
+
+
+def resolve_default_model(workspace_dir: Path | None = None) -> str:
+    config_model = ""
+    if workspace_dir is not None:
+        for config_path in _iter_project_config_paths(workspace_dir):
+            parsed = _parse_codex_model_from_config(config_path)
+            if parsed:
+                config_model = parsed
+    if not config_model:
+        config_model = _parse_codex_model_from_config(_codex_config_path())
+    return config_model or DEFAULT_MODEL
 
 
 def prompt_choice(prompt: str, valid: set[str], default: str) -> str:
@@ -652,6 +756,9 @@ def resolve_prompt(args: argparse.Namespace) -> str:
 
 async def run_client(args: argparse.Namespace) -> int:
     global _interactive_approvals_enabled
+    workspace_dir = Path(args.cwd).resolve() if getattr(args, "cwd", "") else Path.cwd().resolve()
+    if not getattr(args, "model", ""):
+        args.model = resolve_default_model(workspace_dir)
     timeout = args.timeout if args.timeout > 0 else None
     connect_timeout = args.connect_timeout if args.connect_timeout > 0 else None
     resume_timeout = args.resume_timeout if args.resume_timeout > 0 else None
@@ -780,7 +887,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("prompt", nargs="?", default="")
     parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--cwd", default="", help="Explicit working directory to send; omitted lets app-server choose its default.")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", default="", help="Model to use. If omitted, read ~/.codex/config.toml and fall back to the client default.")
     parser.add_argument("--sandbox", default="read-only")
     parser.add_argument("--personality", default="pragmatic")
     parser.add_argument("--instructions", default="")

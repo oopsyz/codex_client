@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ from codex_ws_client import (  # noqa: E402
     run_detached_turn,
     run_turn,
     run_repl,
+    resolve_default_model,
 )
 
 SCHEMA_MANIFEST = {
@@ -366,6 +368,34 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         proc = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0)
         self.assertIn("Codex app-server WebSocket client", proc.stdout)
+
+    def test_resolve_default_model_reads_codex_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_dir = Path(tmp) / ".codex"
+            codex_dir.mkdir()
+            (codex_dir / "config.toml").write_text('model = "gpt-5.4-mini"\n', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_dir)}, clear=False):
+                self.assertEqual(resolve_default_model(), "gpt-5.4-mini")
+
+    def test_resolve_default_model_falls_back_when_config_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"CODEX_HOME": tmp}, clear=False):
+                self.assertEqual(resolve_default_model(), "gpt-5")
+
+    def test_resolve_default_model_prefers_project_config_over_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            subdir = root / "nested" / "work"
+            subdir.mkdir(parents=True)
+            (root / ".git").mkdir()
+            user_codex = Path(tmp) / "user-codex"
+            user_codex.mkdir()
+            (user_codex / "config.toml").write_text('model = "gpt-5.4-mini"\n', encoding="utf-8")
+            project_codex = root / ".codex"
+            project_codex.mkdir()
+            (project_codex / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(user_codex)}, clear=False):
+                self.assertEqual(resolve_default_model(subdir), "gpt-5.5")
 
     def test_main_returns_sigint_for_forced_loop_stop_only(self) -> None:
         def fake_asyncio_run(coro: object) -> None:
