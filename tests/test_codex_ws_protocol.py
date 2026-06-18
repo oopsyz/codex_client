@@ -19,11 +19,14 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from codex_ws_client import (  # noqa: E402
     APP_SERVER_OVERLOADED,
     EXIT_SUCCESS,
+    EXIT_SIGINT,
+    _cancel,
     ProtocolClient,
     RetryConfig,
     RpcError,
     TurnDeadline,
     ensure_thread,
+    run_detached_turn,
     run_turn,
     run_repl,
 )
@@ -96,6 +99,29 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((thread_id, reused), ("thread-1", True))
         self.assertEqual(ws.sent[0]["method"], "thread/resume")
         self.assertEqual(ws.sent[0]["params"]["cwd"], "C:/repo")
+
+    async def test_resume_thread_omits_cwd_when_not_provided(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(
+            thread_id="thread-1",
+            cwd="",
+            sandbox="read-only",
+            model="gpt-5",
+            personality="pragmatic",
+            instructions="dev",
+            ephemeral=False,
+            print_thread_id=False,
+        )
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"thread": {"id": "thread-1", "status": {"type": "idle"}}}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        thread_id, reused = await ensure_thread(client, args, None, 1, 1)
+        self.assertEqual((thread_id, reused), ("thread-1", True))
+        self.assertEqual(ws.sent[0]["method"], "thread/resume")
+        self.assertNotIn("cwd", ws.sent[0]["params"])
 
     async def test_force_new_thread_ignores_existing_thread_id(self) -> None:
         class ThreadClient:
@@ -186,6 +212,101 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         await client.request("turn/interrupt", {"threadId": "t", "turnId": "u"}, timeout=1, retry_overload=False)
         self.assertEqual(ws.sent[0]["method"], "turn/interrupt")
 
+    async def test_thread_unsubscribe_request_can_be_sent(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"status": "unsubscribed"}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await client.unsubscribe_thread("thread-1", timeout=1)
+        self.assertEqual(result, {"status": "unsubscribed"})
+        self.assertEqual(ws.sent[0]["method"], "thread/unsubscribe")
+        self.assertEqual(ws.sent[0]["params"], {"threadId": "thread-1"})
+
+    async def test_turn_start_omits_cwd_when_not_provided(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(no_stream=True, json=False, output_schema="", summary=False, out="")
+        calls = 0
+
+        async def recv() -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(response_for(ws.sent[-1], {"turn": {"id": "turn-1"}}))
+            return json.dumps({"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}})
+
+        ws.recv = recv  # type: ignore[method-assign]
+        exit_code, _ = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
+        self.assertEqual(exit_code, EXIT_SUCCESS)
+        self.assertEqual(ws.sent[0]["method"], "turn/start")
+        self.assertNotIn("cwd", ws.sent[0]["params"])
+
+    async def test_detached_turn_starts_then_unsubscribes(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(output_schema="")
+
+        async def recv() -> str:
+            if ws.sent[-1]["method"] == "turn/start":
+                return json.dumps(response_for(ws.sent[-1], {"turn": {"id": "turn-1", "status": "inProgress", "items": []}}))
+            return json.dumps(response_for(ws.sent[-1], {"status": "unsubscribed"}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await run_detached_turn(client, args, "thread-1", None, "prompt", 1)
+        self.assertEqual(
+            result,
+            {
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "status": "detached",
+                "turn_status": "inProgress",
+                "unsubscribe_status": "unsubscribed",
+            },
+        )
+        self.assertEqual([sent["method"] for sent in ws.sent], ["turn/start", "thread/unsubscribe"])
+        self.assertNotIn("cwd", ws.sent[0]["params"])
+
+    async def test_cancel_requests_interrupt_on_next_loop_iteration(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, object]]] = []
+                self.recv_calls = 0
+
+            async def request(self, method: str, params: dict[str, object], timeout: float | None = None, deadline: object = None) -> dict[str, object]:
+                self.calls.append((method, params))
+                if method == "turn/start":
+                    return {"turn": {"id": "turn-1"}}
+                raise AssertionError(f"unexpected request: {method}")
+
+            async def interrupt_turn(self, thread_id: str, turn_id: str, timeout: float | None = None) -> dict[str, object]:
+                self.calls.append(("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}))
+                return {}
+
+            async def recv_json(self, timeout: float | None, deadline: object = None) -> dict[str, object]:
+                self.recv_calls += 1
+                self.calls.append(("recv_json", {"count": self.recv_calls}))
+                if self.recv_calls == 1:
+                    _cancel.active_turn_id = "turn-1"
+                    _cancel.cancel_requested = True
+                    return {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"turnId": "turn-1", "delta": "hello"}}
+                return {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}}
+
+        client = FakeClient()
+        args = SimpleNamespace(no_stream=True, json=False, output_schema="", summary=False, out="")
+        original_cancel_state = (_cancel.active_turn_id, _cancel.cancel_requested)
+        try:
+            _cancel.active_turn_id = ""
+            _cancel.cancel_requested = False
+            exit_code, _ = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
+        finally:
+            _cancel.active_turn_id, _cancel.cancel_requested = original_cancel_state
+
+        self.assertEqual(exit_code, EXIT_SUCCESS)
+        self.assertEqual([call[0] for call in client.calls], ["turn/start", "recv_json", "turn/interrupt", "recv_json"])
+
     async def test_repl_turn_uses_configured_deadline(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -216,6 +337,36 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         proc = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0)
         self.assertIn("Codex app-server WebSocket client", proc.stdout)
+
+    def test_main_returns_sigint_for_forced_loop_stop_only(self) -> None:
+        def fake_asyncio_run(coro: object) -> None:
+            if hasattr(coro, "close"):
+                coro.close()  # type: ignore[call-arg]
+            raise RuntimeError("Event loop stopped before Future completed.")
+
+        with mock.patch("codex_ws_client.parse_args", return_value=SimpleNamespace()), mock.patch(
+            "codex_ws_client.asyncio.run",
+            side_effect=fake_asyncio_run,
+        ):
+            from codex_ws_client import main
+
+            self.assertEqual(main(), EXIT_SIGINT)
+
+    def test_main_propagates_unexpected_runtime_error(self) -> None:
+        def fake_asyncio_run(coro: object) -> None:
+            if hasattr(coro, "close"):
+                coro.close()  # type: ignore[call-arg]
+            raise RuntimeError("unexpected runtime failure")
+
+        with mock.patch("codex_ws_client.parse_args", return_value=SimpleNamespace()), mock.patch(
+            "codex_ws_client.asyncio.run",
+            side_effect=fake_asyncio_run,
+        ):
+            from codex_ws_client import main
+
+            with self.assertRaises(RuntimeError) as ctx:
+                main()
+            self.assertEqual(str(ctx.exception), "unexpected runtime failure")
 
     async def test_overload_retries_with_backoff(self) -> None:
         ws = MockWebSocket([])
@@ -300,6 +451,8 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             subprocess.run(["cmd", "/c", "codex", "app-server", "generate-json-schema", "--out", str(schema_dir)], check=True)
             with (schema_dir / "v2" / "ThreadListParams.json").open("r", encoding="utf-8") as fh:
                 thread_list_schema = json.load(fh)
+            with (schema_dir / "v2" / "ThreadUnsubscribeParams.json").open("r", encoding="utf-8") as fh:
+                thread_unsubscribe_schema = json.load(fh)
             with (schema_dir / "v2" / "TurnStartParams.json").open("r", encoding="utf-8") as fh:
                 turn_start_schema = json.load(fh)
             validate(
@@ -309,6 +462,14 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             validate(
                 instance={"threadId": "thread-1", "cwd": "C:/repo", "approvalPolicy": "never", "input": [{"type": "text", "text": "prompt"}]},
                 schema=turn_start_schema,
+            )
+            validate(
+                instance={"threadId": "thread-1", "approvalPolicy": "never", "input": [{"type": "text", "text": "prompt"}]},
+                schema=turn_start_schema,
+            )
+            validate(
+                instance={"threadId": "thread-1"},
+                schema=thread_unsubscribe_schema,
             )
 
 

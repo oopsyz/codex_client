@@ -98,6 +98,8 @@ The client uses this protocol flow:
 5. send `turn/start`
 6. consume streamed notifications until the turn finishes
 
+If `--cwd` is omitted, the client leaves `cwd` out of the protocol params and `codex app-server` uses its own default workspace.
+
 It handles:
 
 - `item/agentMessage/delta`
@@ -122,10 +124,12 @@ Persistence:
 - threads are persisted by default
 - `--ephemeral` disables persistence
 - `--thread-id` only makes sense for non-ephemeral threads
+- `--detach` starts a turn, calls `thread/unsubscribe`, prints IDs, and exits without waiting for completion
 
 Important:
 
 - `--ephemeral` threads cannot be resumed across connections
+- `--detach` cannot be used with `--ephemeral` because detached work must be readable later
 - if a resumed thread cannot be loaded, one-shot mode fails fast
 - in REPL mode, some stale-thread cases may fall back to a new thread
 
@@ -202,6 +206,20 @@ Structured output with trace:
 
 ```powershell
 python skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-file trace.jsonl "Return metadata"
+```
+
+Fire-and-forget long-running work:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "Run the long task"
+```
+
+Without `--json`, `--detach` prints `THREAD_ID=`, `TURN_ID=`, `TURN_STATUS=`, and `UNSUBSCRIBE_STATUS=` to stdout because those IDs are the command's primary result.
+
+Check the detached thread later:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --read-thread THREAD_ID --include-turns
 ```
 
 ## REPL Commands
@@ -285,6 +303,7 @@ Set any of them to `0` for no timeout.
 Prefer:
 
 - `--json` for machine consumption
+- `--detach --json` for long-running turns you want to check later
 - `--no-stream` if you only need the final answer text
 - `--thread-id` only for known persisted threads
 - `--ndjson-file` when debugging protocol behavior
@@ -292,6 +311,7 @@ Prefer:
 Avoid:
 
 - using `--thread-id` with threads created via `--ephemeral`
+- using `--detach` with `--ephemeral`
 - relying on REPL-only features from one-shot mode
 - expecting full protocol coverage for every server request type
 

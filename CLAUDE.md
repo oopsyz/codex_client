@@ -26,6 +26,9 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --repl
 # JSON structured output
 python skills/codex-ws-client/scripts/codex_ws_client.py --json "prompt"
 
+# Fire-and-forget long-running work
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "prompt"
+
 # Resume existing thread
 python skills/codex-ws-client/scripts/codex_ws_client.py --thread-id <id> "prompt"
 ```
@@ -55,6 +58,10 @@ Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-cl
 3. `thread/start` (new) or `thread/resume` (existing via `--thread-id`)
 4. `turn/start` with the prompt - stream deltas from server
 5. Handle server requests (approvals, elicitations) inline; auto-decline by default
+
+With `--detach`, the client sends `turn/start`, calls `thread/unsubscribe`, prints `thread_id`/`turn_id`, and exits without waiting for turn completion.
+
+If `--cwd` is omitted, the client does not send `cwd` and the server uses its own default workspace.
 
 **Key async functions:**
 

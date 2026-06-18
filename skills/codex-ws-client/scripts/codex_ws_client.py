@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import argparse
 import asyncio
 import json
@@ -44,6 +45,9 @@ def close_ndjson() -> None:
     if _ndjson_file:
         _ndjson_file.close()
         _ndjson_file = None
+
+
+atexit.register(close_ndjson)
 
 
 def write_ndjson(event_type: str, data: Any, turn_id: str = "") -> None:
@@ -182,18 +186,22 @@ class ProtocolClient:
         self.verbosity = verbosity
         self.retry = retry
 
+    async def _recv_ws_json(self, timeout: float | None, deadline: TurnDeadline | None = None) -> dict[str, Any]:
+        wait_timeout = deadline.remaining_timeout(timeout) if deadline else timeout
+        raw = await asyncio.wait_for(self.ws.recv(), timeout=wait_timeout)
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ProtocolParseError(f"Failed to parse server message as JSON: {exc}") from exc
+        write_ndjson("recv", msg, msg.get("params", {}).get("turnId", ""))
+        return msg
+
     async def recv_json(self, timeout: float | None, deadline: TurnDeadline | None = None) -> dict[str, Any]:
         while True:
             if self.pending_messages:
                 msg = self.pending_messages.popleft()
             else:
-                wait_timeout = deadline.remaining_timeout(timeout) if deadline else timeout
-                raw = await asyncio.wait_for(self.ws.recv(), timeout=wait_timeout)
-                try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise ProtocolParseError(f"Failed to parse server message as JSON: {exc}") from exc
-                write_ndjson("recv", msg, msg.get("params", {}).get("turnId", ""))
+                msg = await self._recv_ws_json(timeout, deadline)
             if await self.handle_server_request(self.ws, msg, self.verbosity):
                 continue
             return msg
@@ -242,13 +250,7 @@ class ProtocolClient:
             self.pending_messages.append(message)
 
         while True:
-            wait_timeout = deadline.remaining_timeout(timeout) if deadline else timeout
-            raw = await asyncio.wait_for(self.ws.recv(), timeout=wait_timeout)
-            try:
-                message = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise ProtocolParseError(f"Failed to parse server message as JSON: {exc}") from exc
-            write_ndjson("recv", message, message.get("params", {}).get("turnId", ""))
+            message = await self._recv_ws_json(timeout, deadline)
             if await self.handle_server_request(self.ws, message, self.verbosity):
                 continue
             if message.get("id") == req_id:
@@ -278,6 +280,9 @@ class ProtocolClient:
             timeout=timeout,
             retry_overload=False,
         )
+
+    async def unsubscribe_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
+        return await self.request("thread/unsubscribe", {"threadId": thread_id}, timeout=timeout)
 
     async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, Any]:
         return await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns}, timeout=timeout)
@@ -401,9 +406,8 @@ def install_sigint_handler(loop: asyncio.AbstractEventLoop) -> None:
     signal.signal(signal.SIGINT, windows_handler)
 
 
-def make_thread_params(args: argparse.Namespace, cwd: str, developer_instructions: str) -> dict[str, Any]:
-    return {
-        "cwd": cwd,
+def make_thread_params(args: argparse.Namespace, cwd: str | None, developer_instructions: str) -> dict[str, Any]:
+    params: dict[str, Any] = {
         "approvalPolicy": "never",
         "sandbox": args.sandbox,
         "model": args.model,
@@ -411,6 +415,9 @@ def make_thread_params(args: argparse.Namespace, cwd: str, developer_instruction
         "developerInstructions": developer_instructions,
         "ephemeral": args.ephemeral,
     }
+    if cwd is not None:
+        params["cwd"] = cwd
+    return params
 
 
 def make_json_result(thread_id: str, turn_id: str, text: str, status: str, error: str | None = None) -> dict[str, Any]:
@@ -420,10 +427,29 @@ def make_json_result(thread_id: str, turn_id: str, text: str, status: str, error
     return result
 
 
+def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, prompt: str) -> dict[str, Any]:
+    params: dict[str, Any] = {"threadId": thread_id, "approvalPolicy": "never", "input": [{"type": "text", "text": prompt}]}
+    if cwd is not None:
+        params["cwd"] = cwd
+    if getattr(args, "output_schema", ""):
+        params["outputSchema"] = json.loads(args.output_schema)
+    return params
+
+
+def make_detach_result(thread_id: str, turn_id: str, turn_status: str, unsubscribe_status: str) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "status": "detached",
+        "turn_status": turn_status,
+        "unsubscribe_status": unsubscribe_status,
+    }
+
+
 async def ensure_thread(
     client: ProtocolClient,
     args: argparse.Namespace,
-    cwd: str,
+    cwd: str | None,
     timeout: float | None,
     resume_timeout: float | None,
     *,
@@ -445,21 +471,28 @@ async def ensure_thread(
     return thread_id, False
 
 
-async def run_turn(client: ProtocolClient, args: argparse.Namespace, thread_id: str, cwd: str, prompt: str, timeout: float | None, deadline_seconds: float | None) -> tuple[int, dict[str, Any] | None]:
+async def run_turn(
+    client: ProtocolClient,
+    args: argparse.Namespace,
+    thread_id: str,
+    cwd: str | None,
+    prompt: str,
+    timeout: float | None,
+    deadline_seconds: float | None,
+) -> tuple[int, dict[str, Any] | None]:
     deadline = TurnDeadline(deadline_seconds)
     started_at = monotonic()
     turn_id = ""
     try:
-        turn_params: dict[str, Any] = {"threadId": thread_id, "cwd": cwd, "approvalPolicy": "never", "input": [{"type": "text", "text": prompt}]}
-        if getattr(args, "output_schema", ""):
-            turn_params["outputSchema"] = json.loads(args.output_schema)
-        turn = await client.request("turn/start", turn_params, timeout=timeout, deadline=deadline)
+        turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout, deadline=deadline)
         turn_id = turn["turn"]["id"]
         _cancel.active_turn_id = turn_id
         _cancel.cancel_requested = False
         deltas: list[str] = []
         completed_text = ""
         while True:
+            # Ctrl+C only flips the cancel flag; the interrupt RPC is sent on the next loop
+            # iteration, so a quiet/stalled recv still waits for a timeout or a server message.
             if _cancel.cancel_requested and _cancel.active_turn_id == turn_id:
                 try:
                     await client.interrupt_turn(thread_id, turn_id, timeout=timeout)
@@ -512,11 +545,28 @@ async def run_turn(client: ProtocolClient, args: argparse.Namespace, thread_id: 
         return EXIT_SIGINT, None
 
 
+async def run_detached_turn(
+    client: ProtocolClient,
+    args: argparse.Namespace,
+    thread_id: str,
+    cwd: str | None,
+    prompt: str,
+    timeout: float | None,
+) -> dict[str, Any]:
+    turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout)
+    turn_data = turn["turn"]
+    turn_id = turn_data["id"]
+    turn_status = turn_data.get("status", "unknown")
+    unsubscribe = await client.unsubscribe_thread(thread_id, timeout=timeout)
+    unsubscribe_status = str(unsubscribe.get("status", "unknown"))
+    return make_detach_result(thread_id, turn_id, str(turn_status), unsubscribe_status)
+
+
 async def run_repl(
     client: ProtocolClient,
     args: argparse.Namespace,
     thread_id: str,
-    cwd: str,
+    cwd: str | None,
     timeout: float | None,
     resume_timeout: float | None,
     turn_deadline_seconds: float | None,
@@ -574,7 +624,7 @@ async def run_client(args: argparse.Namespace) -> int:
     connect_timeout = args.connect_timeout if args.connect_timeout > 0 else None
     resume_timeout = args.resume_timeout if args.resume_timeout > 0 else None
     turn_deadline = args.turn_deadline if args.turn_deadline > 0 else None
-    cwd = str(Path(args.cwd).resolve())
+    cwd = str(Path(args.cwd).resolve()) if getattr(args, "cwd", "") else None
     _interactive_approvals_enabled = bool(getattr(args, "interactive_approvals", False) and getattr(args, "repl", False))
     try:
         headers = parse_headers(args.header or [])
@@ -598,6 +648,15 @@ async def run_client(args: argparse.Namespace) -> int:
     if args.prompt_file and args.prompt:
         print("Cannot use both prompt and --prompt-file.", file=sys.stderr)
         return EXIT_BAD_ARGS
+    if args.detach and args.repl:
+        print("Cannot use --detach with --repl.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.detach and (args.list_threads or args.read_thread):
+        print("Cannot use --detach with --list-threads or --read-thread.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.detach and args.ephemeral:
+        print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
+        return EXIT_BAD_ARGS
     if not args.repl and not args.list_threads and not args.read_thread and not prompt.strip():
         print("A prompt is required unless --repl, --list-threads or --read-thread is used.", file=sys.stderr)
         return EXIT_BAD_ARGS
@@ -607,9 +666,9 @@ async def run_client(args: argparse.Namespace) -> int:
         connect_kwargs["additional_headers"] = headers
     if args.ndjson_file:
         open_ndjson(args.ndjson_file)
+    loop = asyncio.get_running_loop()
+    install_sigint_handler(loop)
     try:
-        loop = asyncio.get_running_loop()
-        install_sigint_handler(loop)
         async with asyncio.timeout(connect_timeout) if connect_timeout else asyncio.timeout(None):
             ws = await websockets.connect(args.uri, **connect_kwargs)
     except asyncio.TimeoutError:
@@ -634,6 +693,16 @@ async def run_client(args: argparse.Namespace) -> int:
             thread_id, reused = await ensure_thread(client, args, cwd, timeout, resume_timeout)
             if args.repl:
                 return await run_repl(client, args, thread_id, cwd, timeout, resume_timeout, turn_deadline)
+            if args.detach:
+                result = await run_detached_turn(client, args, thread_id, cwd, prompt, resume_timeout if reused else timeout)
+                if args.json:
+                    safe_print(json.dumps(result, indent=2))
+                else:
+                    safe_print(f"THREAD_ID={result['thread_id']}")
+                    safe_print(f"TURN_ID={result['turn_id']}")
+                    safe_print(f"TURN_STATUS={result['turn_status']}")
+                    safe_print(f"UNSUBSCRIBE_STATUS={result['unsubscribe_status']}")
+                return EXIT_SUCCESS
             code, json_result = await run_turn(client, args, thread_id, cwd, prompt, resume_timeout if reused else timeout, turn_deadline)
             if json_result is not None:
                 safe_print(json.dumps(json_result, indent=2))
@@ -666,15 +735,19 @@ async def run_client(args: argparse.Namespace) -> int:
 def main() -> int:
     try:
         return asyncio.run(run_client(parse_args()))
-    except (RuntimeError, KeyboardInterrupt):
+    except KeyboardInterrupt:
         return EXIT_SIGINT
+    except RuntimeError as exc:
+        if str(exc).startswith("Event loop stopped before Future completed."):
+            return EXIT_SIGINT
+        raise
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Codex app-server WebSocket client.")
     parser.add_argument("prompt", nargs="?", default="")
     parser.add_argument("--uri", default=DEFAULT_URI)
-    parser.add_argument("--cwd", default=".")
+    parser.add_argument("--cwd", default="", help="Explicit working directory to send; omitted lets app-server choose its default.")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--sandbox", default="read-only")
     parser.add_argument("--personality", default="pragmatic")
@@ -686,6 +759,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-stream", action="store_true")
     parser.add_argument("--repl", action="store_true")
+    parser.add_argument("--detach", action="store_true", help="Start a turn, unsubscribe from the thread, print IDs, and exit without waiting for completion.")
     parser.add_argument("--interactive-approvals", action="store_true")
     parser.add_argument("--output-schema", default="")
     parser.add_argument("--summary", action="store_true")

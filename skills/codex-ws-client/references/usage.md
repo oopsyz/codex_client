@@ -25,6 +25,10 @@ The client does:
 5. send `turn/start`
 6. consume notifications until completion or failure
 
+With `--detach`, step 6 is replaced by `thread/unsubscribe`; the client prints the thread and turn IDs and exits while the server continues the turn.
+
+If `--cwd` is omitted, the client leaves `cwd` out of the protocol params and `codex app-server` uses its own default workspace.
+
 It handles:
 - `item/agentMessage/delta`
 - `turn/completed`
@@ -41,10 +45,12 @@ Persisted thread:
 - default creation mode persists threads
 - reuse with `--thread-id`
 - resumed turns use `--resume-timeout`
+- use `--detach` for fire-and-forget turns that will be inspected later with `--read-thread THREAD_ID --include-turns`
 
 Ephemeral thread:
 - use `--ephemeral`
 - cannot be resumed across connections
+- cannot be used with `--detach`
 
 ## REPL behavior
 
@@ -72,6 +78,8 @@ Interactive approvals:
 - status and optional error
 - notification summaries
 - metrics such as latency and token counts
+
+With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, and `unsubscribe_status`.
 
 ## Known limits
 

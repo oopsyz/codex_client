@@ -87,6 +87,8 @@ ws://127.0.0.1:8765
 5. 发送 `turn/start`
 6. 持续消费流式通知，直到当前轮次结束
 
+如果省略 `--cwd`，客户端会在协议参数中省略 `cwd`，由 `codex app-server` 使用它自己的默认工作区。
+
 它可以处理：
 
 - `item/agentMessage/delta`

@@ -13,7 +13,8 @@ Use the bundled single-file script at `scripts/codex_ws_client.py` as the local 
 2. Prefer `--json` when another tool or LLM needs machine-readable output.
 3. For **multi-turn conversations**: use `--json` and parse `thread_id` from the result to chain turns (see pattern below). Prefer `--repl` when running interactively.
 4. Prefer `--thread-id` only for persisted threads created without `--ephemeral`.
-5. Use `--ndjson-file` or `-vv` when debugging protocol behavior.
+5. Use `--detach --json` for long-running work that should continue on the server and be checked later.
+6. Use `--ndjson-file` or `-vv` when debugging protocol behavior.
 
 ## Script path
 
@@ -60,6 +61,13 @@ Resume a persisted thread:
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --thread-id THREAD_ID "Continue the previous conversation"
 ```
 
+Fire-and-forget long-running work:
+
+```bash
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "Run the long task"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-thread THREAD_ID --include-turns
+```
+
 Prompt from file:
 
 ```bash
@@ -77,6 +85,7 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-
 - Transport is WebSocket only.
 - The client does not start `codex app-server`; the server must already be running.
 - `--ephemeral` threads are not resumable across connections.
+- `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
 - In one-shot mode, stale resumed threads fail fast instead of silently switching context.
 - In REPL mode, `/new` starts a fresh thread.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.
