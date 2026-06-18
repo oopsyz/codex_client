@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import argparse
 import asyncio
+import inspect
 import json
 import random
 import signal
@@ -284,6 +285,14 @@ class ProtocolClient:
     async def unsubscribe_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
         return await self.request("thread/unsubscribe", {"threadId": thread_id}, timeout=timeout)
 
+    async def close(self) -> None:
+        close = getattr(self.ws, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
     async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, Any]:
         return await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns}, timeout=timeout)
 
@@ -483,6 +492,15 @@ async def run_turn(
     deadline = TurnDeadline(deadline_seconds)
     started_at = monotonic()
     turn_id = ""
+
+    async def _close_client() -> None:
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
     try:
         turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout, deadline=deadline)
         turn_id = turn["turn"]["id"]
@@ -517,6 +535,7 @@ async def run_turn(
                 text = "".join(deltas).strip() or completed_text.strip()
                 if status == "failed":
                     result = make_json_result(thread_id, turn_id, "", "failed", params.get("turn", {}).get("error", "Unknown turn failure"))
+                    await _close_client()
                     return EXIT_TURN_FAILURE, result if args.json else result
                 if args.summary:
                     elapsed_ms = int(round((monotonic() - started_at) * 1000))
@@ -524,16 +543,19 @@ async def run_turn(
                 if args.out:
                     Path(args.out).write_text(text, encoding="utf-8")
                 if args.json:
+                    await _close_client()
                     return EXIT_SUCCESS, make_json_result(thread_id, turn_id, text, status)
                 if args.no_stream:
                     safe_print(text)
                 elif text:
                     safe_print()
                 _cancel.reset()
+                await _close_client()
                 return EXIT_SUCCESS, None
             elif method == "turn/failed":
                 result = make_json_result(thread_id, turn_id, "", "failed", params.get("error", "Unknown turn failure"))
                 _cancel.reset()
+                await _close_client()
                 return EXIT_TURN_FAILURE, result if args.json else result
     except asyncio.CancelledError:
         if turn_id:
@@ -542,6 +564,7 @@ async def run_turn(
             except Exception:
                 pass
         _cancel.reset()
+        await _close_client()
         return EXIT_SIGINT, None
 
 
@@ -553,12 +576,21 @@ async def run_detached_turn(
     prompt: str,
     timeout: float | None,
 ) -> dict[str, Any]:
+    async def _close_client() -> None:
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
     turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout)
     turn_data = turn["turn"]
     turn_id = turn_data["id"]
     turn_status = turn_data.get("status", "unknown")
     unsubscribe = await client.unsubscribe_thread(thread_id, timeout=timeout)
     unsubscribe_status = str(unsubscribe.get("status", "unknown"))
+    await _close_client()
     return make_detach_result(thread_id, turn_id, str(turn_status), unsubscribe_status)
 
 

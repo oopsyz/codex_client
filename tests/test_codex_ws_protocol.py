@@ -61,6 +61,8 @@ class MockWebSocket:
         for message in messages:
             self.messages.put_nowait(message if isinstance(message, str) else json.dumps(message))
         self.sent: list[dict[str, object]] = []
+        self.closed = False
+        self.close_calls = 0
 
     async def send(self, raw: str) -> None:
         self.sent.append(json.loads(raw))
@@ -70,6 +72,10 @@ class MockWebSocket:
         if isinstance(item, BaseException):
             raise item
         return item
+
+    async def close(self) -> None:
+        self.closed = True
+        self.close_calls += 1
 
 
 def response_for(sent: dict[str, object], result: dict[str, object]) -> dict[str, object]:
@@ -243,6 +249,27 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exit_code, EXIT_SUCCESS)
         self.assertEqual(ws.sent[0]["method"], "turn/start")
         self.assertNotIn("cwd", ws.sent[0]["params"])
+        self.assertTrue(ws.closed)
+        self.assertEqual(ws.close_calls, 1)
+
+    async def test_turn_completion_closes_socket_on_terminal_response(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(no_stream=True, json=False, output_schema="", summary=False, out="")
+        calls = 0
+
+        async def recv() -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(response_for(ws.sent[-1], {"turn": {"id": "turn-1"}}))
+            return json.dumps({"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}})
+
+        ws.recv = recv  # type: ignore[method-assign]
+        exit_code, _ = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
+        self.assertEqual(exit_code, EXIT_SUCCESS)
+        self.assertTrue(ws.closed)
+        self.assertEqual(ws.close_calls, 1)
 
     async def test_detached_turn_starts_then_unsubscribes(self) -> None:
         ws = MockWebSocket([])
@@ -268,6 +295,8 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([sent["method"] for sent in ws.sent], ["turn/start", "thread/unsubscribe"])
         self.assertNotIn("cwd", ws.sent[0]["params"])
+        self.assertTrue(ws.closed)
+        self.assertEqual(ws.close_calls, 1)
 
     async def test_cancel_requests_interrupt_on_next_loop_iteration(self) -> None:
         class FakeClient:
