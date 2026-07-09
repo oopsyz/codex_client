@@ -130,6 +130,7 @@ Important:
 
 - `--ephemeral` threads cannot be resumed across connections
 - `--detach` cannot be used with `--ephemeral` because detached work must be readable later
+- detached `status: "detached"` means the client disconnected successfully; inspect the turn later to determine whether the server completed it
 - if a resumed thread cannot be loaded, one-shot mode fails fast
 - in REPL mode, some stale-thread cases may fall back to a new thread
 
@@ -222,6 +223,17 @@ Check the detached thread later:
 python skills/codex-ws-client/scripts/codex_ws_client.py --read-thread THREAD_ID --include-turns
 ```
 
+Read one persisted turn in normalized form:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID TURN_ID
+```
+
+`--read-turn` returns the turn status, concatenated `agentMessage` text, the
+raw turn object, and any server error. If the turn is not present, it returns
+`status: "not_found"`. This is a transport/read result; callers decide what
+the returned text means for their workflow.
+
 ## REPL Commands
 
 Available in REPL mode:
@@ -304,6 +316,7 @@ Prefer:
 
 - `--json` for machine consumption
 - `--detach --json` for long-running turns you want to check later
+- `--read-turn THREAD_ID TURN_ID` when a caller needs one turn without parsing the full thread response
 - `--no-stream` if you only need the final answer text
 - `--thread-id` only for known persisted threads
 - `--ndjson-file` when debugging protocol behavior

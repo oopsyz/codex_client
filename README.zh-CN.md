@@ -117,6 +117,7 @@ ws://127.0.0.1:8765
 注意：
 
 - `--ephemeral` 线程无法跨连接恢复
+- `--detach` 返回的 `status: "detached"` 只表示客户端已取消订阅并断开，不表示轮次已经完成
 - 如果恢复线程失败，单次调用模式会快速失败
 - 在 REPL 模式下，某些过期线程场景可能会回退为新线程
 
@@ -170,6 +171,14 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --json "List the main e
 ```powershell
 python skills/codex-ws-client/scripts/codex_ws_client.py --thread-id THREAD_ID "Continue the previous conversation"
 ```
+
+读取单个持久化轮次：
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID TURN_ID
+```
+
+该命令返回标准化的轮次状态、助手文本、原始轮次对象和错误信息；找不到轮次时返回 `status: "not_found"`。它只负责读取传输结果，不判断工作流是否可以推进。
 
 交互式 REPL：
 

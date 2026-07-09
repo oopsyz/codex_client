@@ -66,6 +66,7 @@ Fire-and-forget long-running work:
 ```bash
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "Run the long task"
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-thread THREAD_ID --include-turns
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID TURN_ID
 ```
 
 Prompt from file:
@@ -86,6 +87,7 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-
 - The client does not start `codex app-server`; the server must already be running.
 - `--ephemeral` threads are not resumable across connections.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
+- `--detach` returns `status: "detached"` for the client operation; inspect the returned turn later to determine whether the server completed it.
 - In one-shot mode, stale resumed threads fail fast instead of silently switching context.
 - In REPL mode, `/new` starts a fresh thread.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.

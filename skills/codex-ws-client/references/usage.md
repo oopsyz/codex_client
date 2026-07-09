@@ -85,7 +85,9 @@ Interactive approvals:
 - notification summaries
 - metrics such as latency and token counts
 
-With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, and `unsubscribe_status`.
+With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, and `unsubscribe_status`. The detached status only means that the client unsubscribed successfully; it is not the final turn status.
+
+Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, concatenated agent-message `text`, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
 
 ## Known limits
 

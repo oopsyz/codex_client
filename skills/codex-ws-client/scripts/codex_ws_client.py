@@ -15,7 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 import websockets
 
@@ -449,6 +449,44 @@ class ProtocolClient:
         return response
 
 
+def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, Any] | None:
+    """Extract a normalized turn result from a ``thread/read`` response.
+
+    This is deliberately a transport helper: it reports what the app-server
+    persisted and does not decide whether the returned text is valid evidence
+    or whether a workflow should advance.
+    """
+    requested_id = str(turn_id or "").strip()
+    thread = thread_response.get("thread") if isinstance(thread_response, Mapping) else None
+    if not isinstance(thread, Mapping):
+        return None
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return None
+    for candidate in turns:
+        if not isinstance(candidate, Mapping) or str(candidate.get("id") or "") != requested_id:
+            continue
+        items = candidate.get("items")
+        text_parts: list[str] = []
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, Mapping) and item.get("type") == "agentMessage":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+        result: dict[str, Any] = {
+            "thread_id": str(thread.get("id") or ""),
+            "turn_id": requested_id,
+            "status": str(candidate.get("status") or "unknown"),
+            "text": "".join(text_parts),
+        }
+        if candidate.get("error") is not None:
+            result["error"] = candidate.get("error")
+        result["turn"] = dict(candidate)
+        return result
+    return None
+
+
 async def default_server_request_handler(ws: Any, message: dict[str, Any], _verbosity: int = 0) -> bool:
     if not is_server_request(message):
         return False
@@ -790,14 +828,14 @@ async def run_client(args: argparse.Namespace) -> int:
     if args.detach and args.repl:
         print("Cannot use --detach with --repl.", file=sys.stderr)
         return EXIT_BAD_ARGS
-    if args.detach and (args.list_threads or args.read_thread):
-        print("Cannot use --detach with --list-threads or --read-thread.", file=sys.stderr)
+    if args.detach and (args.list_threads or args.read_thread or args.read_turn):
+        print("Cannot use --detach with --list-threads, --read-thread, or --read-turn.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
         return EXIT_BAD_ARGS
-    if not args.repl and not args.list_threads and not args.read_thread and not prompt.strip():
-        print("A prompt is required unless --repl, --list-threads or --read-thread is used.", file=sys.stderr)
+    if not args.repl and not args.list_threads and not args.read_thread and not args.read_turn and not prompt.strip():
+        print("A prompt is required unless --repl, --list-threads, --read-thread, or --read-turn is used.", file=sys.stderr)
         return EXIT_BAD_ARGS
 
     connect_kwargs: dict[str, Any] = {"max_size": 8_000_000}
@@ -828,6 +866,19 @@ async def run_client(args: argparse.Namespace) -> int:
             if args.read_thread:
                 result = await client.read_thread(args.read_thread, timeout, include_turns=args.include_turns)
                 safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.read_turn:
+                thread_id, turn_id = args.read_turn
+                result = await client.read_thread(thread_id, timeout, include_turns=True)
+                extracted = extract_turn(result, turn_id)
+                if extracted is None:
+                    extracted = {
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "status": "not_found",
+                        "text": "",
+                    }
+                safe_print(json.dumps(extracted, indent=2))
                 return EXIT_SUCCESS
             thread_id, reused = await ensure_thread(client, args, cwd, timeout, resume_timeout)
             if args.repl:
@@ -912,6 +963,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument("--list-threads", action="store_true", help="Call thread/list and print JSON.")
     parser.add_argument("--read-thread", default="", metavar="THREAD_ID", help="Call thread/read and print JSON.")
+    parser.add_argument(
+        "--read-turn",
+        nargs=2,
+        default=None,
+        metavar=("THREAD_ID", "TURN_ID"),
+        help="Read one persisted turn and print normalized JSON (thread id and turn id required).",
+    )
     parser.add_argument("--include-turns", action="store_true", help="Include turns for --read-thread.")
     parser.add_argument("--filter-cwd", default="", help="thread/list cwd filter.")
     parser.add_argument("--filter-title", default="", help="thread/list title filter.")

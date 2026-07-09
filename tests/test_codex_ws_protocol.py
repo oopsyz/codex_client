@@ -27,6 +27,7 @@ from codex_ws_client import (  # noqa: E402
     RpcError,
     TurnDeadline,
     ensure_thread,
+    extract_turn,
     run_detached_turn,
     run_turn,
     run_repl,
@@ -35,20 +36,20 @@ from codex_ws_client import (  # noqa: E402
 
 SCHEMA_MANIFEST = {
   "ClientNotification.json": "4446a1ae8626aa55d812836bfc2dae24213500d87c4759af2698f6199ea5b59f",
-  "ClientRequest.json": "7aa39426900d503cf414ba9a3c109fcd0b2e53b32befeda13f03b64fa68cf44c",
+  "ClientRequest.json": "5be9bf8117c33b8d1c20a25cd72eaea9122899cd527744ffaac1d12e3f0ba0fb",
   "JSONRPCError.json": "8835db6c4ada12ec628613fe2f571edc2c8fb55fc31bac706085e25ad1a08c0e",
-  "ServerNotification.json": "8f5448857104f26dd9228e4d0f7cfbd9c6b4e136905ba7ce41a9f31b4f9e8d4e",
-  "ServerRequest.json": "5279978a5f553b3c855f1c28281fdea7f3a79d6d6e1e4447ee952623dd56bf9c",
-  "v2/ThreadListParams.json": "bc3b8aad80284111e5a4aebdd7f30530f45a41b3f93d15a8de52e7f40d89e94a",
-  "v2/ThreadListResponse.json": "85bb34bb0e5df5cd2ff2b8ffdfe246e3e0a763c05ede1713e7e20becad436795",
+  "ServerNotification.json": "f81a1c37bf45dad5beeede09f096b6051a5610979342fbc08b38561c1264b6be",
+  "ServerRequest.json": "356862470133e0179625d46b6060f4db195b14ed9e2e5804d6402658791ed791",
+  "v2/ThreadListParams.json": "59eb776ac4f7405f6dd45c953f62da0e8b94b4433aaab79936472471982fe6dd",
+  "v2/ThreadListResponse.json": "f1023c4753f7c8471dd8ac0d75f5867ef6e64294d4119e50c6c0b2793abca4b5",
   "v2/ThreadReadParams.json": "ab07c67662e3a8db06a9a2905af350919c7f9a7d1d1c4055a33c26234b6c9f23",
-  "v2/ThreadReadResponse.json": "d7d614549519fe72ab6040a127a6f794528186d6335f29a6af2deca8c2c3c9f5",
-  "v2/ThreadResumeParams.json": "0ffd678601ef5b7bcc88bcc0d730920fe39fda92398d325d661a4f324366bf2a",
-  "v2/ThreadResumeResponse.json": "3e6f4d67012a04a12761521f36a52028f111870b634084b5df82c128c239376b",
-  "v2/ThreadStartParams.json": "d722042f74bb3155a70b24315f87a0bffe4e5ee1c9a681e004d68e323bd2b94d",
-  "v2/ThreadStartResponse.json": "aa34b960fe2636fe966604771d017b6108c71e86245bd02d24fe86b6ce64cfe7",
-  "v2/TurnStartParams.json": "513aa54ff57ca8fdcaa631c0ca344820ae1e1f9c2a3a926a3a5e944e52c413f5",
-  "v2/TurnStartResponse.json": "ea9ef97812cb55569d4287d812e9100c96e90cc36ad3df43813f2b7e2b79b041",
+  "v2/ThreadReadResponse.json": "72eda7e776a6a30f52bc161cd25703e1fd4fb60ed92969b9ddb3978bbae4ae21",
+  "v2/ThreadResumeParams.json": "d867460ca8c348a8652ea0578ccaa4d67568c2bb462c1c71cd13ac4dcf91dc1b",
+  "v2/ThreadResumeResponse.json": "87a2044caee7ac69a00cf159bf83a0da15a851222761113301f082e627cd6000",
+  "v2/ThreadStartParams.json": "d960450fe2d0c1bf65f5aad42b070faefd59973ea9645d021b011ebdf23b5c03",
+  "v2/ThreadStartResponse.json": "185c3a50c61ae83bc8ac9556e06c2bb759be5a7182017e1121d5992d7c2d2eca",
+  "v2/TurnStartParams.json": "51c6606fb4b7c4efb8fb102afebcc30cc2ee8fe37bdb9da87be9a16880c2fc0a",
+  "v2/TurnStartResponse.json": "d0fdbfb0058b2f964b17d770fa476819c4a2f574c552e703982c3568c016179f",
 }
 
 
@@ -496,6 +497,36 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.sent[0]["method"], "thread/read")
         self.assertTrue(ws.sent[0]["params"]["includeTurns"])
         self.assertEqual(result["thread"]["id"], "thread-1")
+
+    def test_extract_turn_normalizes_agent_messages(self) -> None:
+        result = extract_turn(
+            {
+                "thread": {
+                    "id": "thread-1",
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "status": "completed",
+                            "items": [
+                                {"type": "reasoning", "id": "reason-1"},
+                                {"type": "agentMessage", "id": "msg-1", "text": "first"},
+                                {"type": "agentMessage", "id": "msg-2", "text": " second"},
+                            ],
+                        }
+                    ],
+                }
+            },
+            "turn-1",
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["thread_id"], "thread-1")
+        self.assertEqual(result["turn_id"], "turn-1")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["text"], "first second")
+
+    def test_extract_turn_distinguishes_missing_turn(self) -> None:
+        self.assertIsNone(extract_turn({"thread": {"id": "thread-1", "turns": []}}, "turn-missing"))
 
     def test_generated_schema_manifest_matches_installed_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
