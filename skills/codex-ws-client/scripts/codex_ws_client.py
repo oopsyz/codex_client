@@ -517,7 +517,12 @@ async def default_server_request_handler(ws: Any, message: dict[str, Any], _verb
     return True
 
 
-def parse_headers(raw_headers: list[str]) -> dict[str, str]:
+def parse_headers(
+    raw_headers: list[str],
+    header_env: list[str] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     headers: dict[str, str] = {}
     for raw in raw_headers:
         if ":" not in raw:
@@ -526,6 +531,18 @@ def parse_headers(raw_headers: list[str]) -> dict[str, str]:
         if not name.strip():
             raise ValueError(f"Malformed header: {raw}")
         headers[name.strip()] = value.strip()
+    environment = os.environ if environ is None else environ
+    for binding in header_env or []:
+        if "=" not in binding:
+            raise ValueError(f"Malformed header environment binding: {binding}")
+        name, variable = binding.split("=", 1)
+        name = name.strip()
+        variable = variable.strip()
+        if not name or not variable:
+            raise ValueError(f"Malformed header environment binding: {binding}")
+        if variable not in environment:
+            raise ValueError(f"Header environment variable is not set: {variable}")
+        headers[name] = str(environment[variable])
     return headers
 
 
@@ -804,7 +821,7 @@ async def run_client(args: argparse.Namespace) -> int:
     cwd = str(Path(args.cwd).resolve()) if getattr(args, "cwd", "") else None
     _interactive_approvals_enabled = bool(getattr(args, "interactive_approvals", False) and getattr(args, "repl", False))
     try:
-        headers = parse_headers(args.header or [])
+        headers = parse_headers(args.header or [], args.header_env or [])
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_BAD_ARGS
@@ -960,6 +977,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-timeout", type=float, default=300)
     parser.add_argument("--turn-deadline", type=float, default=0, help="Overall turn deadline in seconds. 0 disables it.")
     parser.add_argument("--header", action="append", default=[])
+    parser.add_argument(
+        "--header-env",
+        action="append",
+        default=[],
+        metavar="HEADER=ENV_VAR",
+        help="Read a header value from an environment variable so credentials do not enter argv.",
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument("--list-threads", action="store_true", help="Call thread/list and print JSON.")
     parser.add_argument("--read-thread", default="", metavar="THREAD_ID", help="Call thread/read and print JSON.")

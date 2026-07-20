@@ -32,6 +32,7 @@ from codex_ws_client import (  # noqa: E402
     run_turn,
     run_repl,
     resolve_default_model,
+    parse_headers,
 )
 
 SCHEMA_MANIFEST = {
@@ -51,6 +52,21 @@ SCHEMA_MANIFEST = {
   "v2/TurnStartParams.json": "51c6606fb4b7c4efb8fb102afebcc30cc2ee8fe37bdb9da87be9a16880c2fc0a",
   "v2/TurnStartResponse.json": "d0fdbfb0058b2f964b17d770fa476819c4a2f574c552e703982c3568c016179f",
 }
+
+
+class HeaderInputTests(unittest.TestCase):
+    def test_header_env_reads_secret_without_requiring_it_in_argv(self) -> None:
+        headers = parse_headers(
+            [],
+            ["Authorization=CODEX_TEST_AUTH"],
+            environ={"CODEX_TEST_AUTH": "Bearer secret-value"},
+        )
+        self.assertEqual(headers, {"Authorization": "Bearer secret-value"})
+
+    def test_header_env_missing_variable_names_only_the_variable(self) -> None:
+        with self.assertRaisesRegex(ValueError, "CODEX_TEST_MISSING") as raised:
+            parse_headers([], ["Authorization=CODEX_TEST_MISSING"], environ={})
+        self.assertNotIn("Authorization: Bearer", str(raised.exception))
 
 
 def _hash_schema(path: Path) -> str:
