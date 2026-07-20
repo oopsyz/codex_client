@@ -275,6 +275,13 @@ async def _noop_request_handler(_ws: Any, _message: dict[str, Any], _verbosity: 
     return False
 
 
+async def _noop_notification_handler(_ws: Any, _message: dict[str, Any], _verbosity: int = 0) -> bool:
+    return False
+
+
+NotificationHandler = Callable[[Any, dict[str, Any], int], Awaitable[bool]]
+
+
 class ProtocolClient:
     def __init__(
         self,
@@ -282,12 +289,14 @@ class ProtocolClient:
         *,
         pending_messages: deque[dict[str, Any]] | None = None,
         handle_server_request: ServerRequestHandler = _noop_request_handler,
+        handle_notification: NotificationHandler = _noop_notification_handler,
         verbosity: int = 0,
         retry: RetryConfig = RetryConfig(),
     ) -> None:
         self.ws = ws
         self.pending_messages = pending_messages if pending_messages is not None else deque()
         self.handle_server_request = handle_server_request
+        self.handle_notification = handle_notification
         self.verbosity = verbosity
         self.retry = retry
 
@@ -308,6 +317,8 @@ class ProtocolClient:
             else:
                 msg = await self._recv_ws_json(timeout, deadline)
             if await self.handle_server_request(self.ws, msg, self.verbosity):
+                continue
+            if is_notification(msg) and await self.handle_notification(self.ws, msg, self.verbosity):
                 continue
             return msg
 
@@ -348,6 +359,8 @@ class ProtocolClient:
             message = self.pending_messages.popleft()
             if await self.handle_server_request(self.ws, message, self.verbosity):
                 continue
+            if is_notification(message) and await self.handle_notification(self.ws, message, self.verbosity):
+                continue
             if message.get("id") == req_id:
                 if "error" in message:
                     raise RpcError.from_payload(message, method)
@@ -357,6 +370,8 @@ class ProtocolClient:
         while True:
             message = await self._recv_ws_json(timeout, deadline)
             if await self.handle_server_request(self.ws, message, self.verbosity):
+                continue
+            if is_notification(message) and await self.handle_notification(self.ws, message, self.verbosity):
                 continue
             if message.get("id") == req_id:
                 if "error" in message:
@@ -400,12 +415,82 @@ class ProtocolClient:
     async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, Any]:
         return await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns}, timeout=timeout)
 
-    async def list_threads(self, timeout: float | None, *, cwd: str = "", title: str = "", updated_after: str = "", updated_before: str = "") -> dict[str, Any]:
-        params: dict[str, Any] = {"sortKey": "updated_at", "sortDirection": "desc"}
+    async def list_loaded_threads(self, timeout: float | None) -> dict[str, Any]:
+        return await self.request("thread/loaded/list", {}, timeout=timeout)
+
+    async def list_thread_items(
+        self,
+        thread_id: str,
+        timeout: float | None,
+        *,
+        cursor: str = "",
+        limit: int = 50,
+        turn_id: str = "",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if turn_id:
+            params["turnId"] = turn_id
+        return await self.request("thread/items/list", params, timeout=timeout)
+
+    async def list_thread_turns(
+        self,
+        thread_id: str,
+        timeout: float | None,
+        *,
+        cursor: str = "",
+        limit: int = 50,
+        sort_direction: str = "desc",
+        items_view: str = "summary",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if sort_direction:
+            params["sortDirection"] = sort_direction
+        if items_view:
+            params["itemsView"] = items_view
+        return await self.request("thread/turns/list", params, timeout=timeout)
+
+    async def list_threads(
+        self,
+        timeout: float | None,
+        *,
+        cursor: str = "",
+        limit: int = 50,
+        sort_key: str = "updated_at",
+        sort_direction: str = "desc",
+        cwd: str | list[str] = "",
+        title: str = "",
+        model_providers: list[str] | None = None,
+        source_kinds: list[str] | None = None,
+        archived: bool | None = None,
+        use_state_db_only: bool | None = None,
+        parent_thread_id: str = "",
+        ancestor_thread_id: str = "",
+        updated_after: str = "",
+        updated_before: str = "",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"sortKey": sort_key, "sortDirection": sort_direction, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
         if cwd:
             params["cwd"] = cwd
         if title:
             params["searchTerm"] = title
+        if model_providers:
+            params["modelProviders"] = model_providers
+        if source_kinds:
+            params["sourceKinds"] = source_kinds
+        if archived is not None:
+            params["archived"] = archived
+        if use_state_db_only is not None:
+            params["useStateDbOnly"] = use_state_db_only
+        if parent_thread_id:
+            params["parentThreadId"] = parent_thread_id
+        if ancestor_thread_id:
+            params["ancestorThreadId"] = ancestor_thread_id
         response = await self.request("thread/list", params, timeout=timeout)
         threads = list(response.get("data", []))
 
@@ -448,6 +533,17 @@ class ProtocolClient:
             response["data"] = filtered
         return response
 
+    async def list_background_terminals(
+        self, thread_id: str, timeout: float | None, *, cursor: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"threadId": thread_id, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return await self.request("thread/backgroundTerminals/list", params, timeout=timeout)
+
+    async def set_thread_name(self, thread_id: str, name: str, timeout: float | None) -> dict[str, Any]:
+        return await self.request("thread/name/set", {"threadId": thread_id, "name": name}, timeout=timeout)
+
 
 def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, Any] | None:
     """Extract a normalized turn result from a ``thread/read`` response.
@@ -485,6 +581,16 @@ def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, 
         result["turn"] = dict(candidate)
         return result
     return None
+
+
+async def default_notification_handler(ws: Any, message: dict[str, Any], verbosity: int = 0) -> bool:
+    method = message.get("method", "")
+    params = message.get("params", {})
+    if method == "thread/status/changed" and verbosity >= 1:
+        thread_id = params.get("threadId", "?")
+        status = params.get("status", {})
+        print(f"[thread/status/changed] thread={thread_id} status={json.dumps(status)}", file=sys.stderr)
+    return False
 
 
 async def default_server_request_handler(ws: Any, message: dict[str, Any], _verbosity: int = 0) -> bool:
@@ -845,14 +951,27 @@ async def run_client(args: argparse.Namespace) -> int:
     if args.detach and args.repl:
         print("Cannot use --detach with --repl.", file=sys.stderr)
         return EXIT_BAD_ARGS
-    if args.detach and (args.list_threads or args.read_thread or args.read_turn):
-        print("Cannot use --detach with --list-threads, --read-thread, or --read-turn.", file=sys.stderr)
+    inspection_operation = any(
+        (
+            args.list_threads,
+            args.list_loaded_threads,
+            args.read_thread,
+            args.read_turn,
+            args.thread_turns,
+            args.thread_items,
+            args.background_terminals,
+            args.interrupt_turn,
+            args.set_thread_name,
+        )
+    )
+    if args.detach and inspection_operation:
+        print("Cannot use --detach with inspection or thread-management commands.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
         return EXIT_BAD_ARGS
-    if not args.repl and not args.list_threads and not args.read_thread and not args.read_turn and not prompt.strip():
-        print("A prompt is required unless --repl, --list-threads, --read-thread, or --read-turn is used.", file=sys.stderr)
+    if not args.repl and not inspection_operation and not prompt.strip():
+        print("A prompt is required unless --repl or an inspection/thread-management command is used.", file=sys.stderr)
         return EXIT_BAD_ARGS
 
     connect_kwargs: dict[str, Any] = {"max_size": 8_000_000}
@@ -874,10 +993,30 @@ async def run_client(args: argparse.Namespace) -> int:
 
     try:
         async with ws:
-            client = ProtocolClient(ws, handle_server_request=default_server_request_handler, verbosity=args.verbose)
+            client = ProtocolClient(ws, handle_server_request=default_server_request_handler, handle_notification=default_notification_handler, verbosity=args.verbose)
             await client.initialize(timeout)
             if args.list_threads:
-                result = await client.list_threads(timeout, cwd=args.filter_cwd, title=args.filter_title, updated_after=args.updated_after, updated_before=args.updated_before)
+                result = await client.list_threads(
+                    timeout,
+                    cursor=args.threads_cursor,
+                    limit=args.threads_limit,
+                    sort_key=args.threads_sort_key,
+                    sort_direction=args.threads_sort_direction,
+                    cwd=args.filter_cwd,
+                    title=args.filter_title,
+                    model_providers=args.model_provider,
+                    source_kinds=args.source_kind,
+                    archived=args.archived,
+                    use_state_db_only=True if args.use_state_db_only else None,
+                    parent_thread_id=args.parent_thread_id,
+                    ancestor_thread_id=args.ancestor_thread_id,
+                    updated_after=args.updated_after,
+                    updated_before=args.updated_before,
+                )
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.list_loaded_threads:
+                result = await client.list_loaded_threads(timeout)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
             if args.read_thread:
@@ -896,6 +1035,46 @@ async def run_client(args: argparse.Namespace) -> int:
                         "text": "",
                     }
                 safe_print(json.dumps(extracted, indent=2))
+                return EXIT_SUCCESS
+            if args.thread_turns:
+                result = await client.list_thread_turns(
+                    args.thread_turns,
+                    timeout,
+                    cursor=args.turns_cursor,
+                    limit=args.turns_limit,
+                    sort_direction=args.turns_sort_direction,
+                    items_view=args.turns_items_view,
+                )
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.thread_items:
+                result = await client.list_thread_items(
+                    args.thread_items,
+                    timeout,
+                    cursor=args.items_cursor,
+                    limit=args.items_limit,
+                    turn_id=args.items_turn_id,
+                )
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.background_terminals:
+                result = await client.list_background_terminals(
+                    args.background_terminals,
+                    timeout,
+                    cursor=args.background_cursor,
+                    limit=args.background_limit,
+                )
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.interrupt_turn:
+                thread_id, turn_id = args.interrupt_turn
+                result = await client.interrupt_turn(thread_id, turn_id, timeout=timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.set_thread_name:
+                thread_id, name = args.set_thread_name
+                result = await client.set_thread_name(thread_id, name, timeout)
+                safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
             thread_id, reused = await ensure_thread(client, args, cwd, timeout, resume_timeout)
             if args.repl:
@@ -986,6 +1165,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument("--list-threads", action="store_true", help="Call thread/list and print JSON.")
+    parser.add_argument("--list-loaded-threads", action="store_true", help="Call thread/loaded/list and print runtime-loaded thread IDs.")
     parser.add_argument("--read-thread", default="", metavar="THREAD_ID", help="Call thread/read and print JSON.")
     parser.add_argument(
         "--read-turn",
@@ -994,9 +1174,50 @@ def parse_args() -> argparse.Namespace:
         metavar=("THREAD_ID", "TURN_ID"),
         help="Read one persisted turn and print normalized JSON (thread id and turn id required).",
     )
+    parser.add_argument(
+        "--thread-turns",
+        default="",
+        metavar="THREAD_ID",
+        help="Experimental: call thread/turns/list and print paginated turn history without resuming the thread.",
+    )
+    parser.add_argument("--turns-cursor", default="", metavar="CURSOR", help="Pagination cursor for --thread-turns.")
+    parser.add_argument("--turns-limit", type=int, default=50, metavar="N", help="Page size for --thread-turns (default 50).")
+    parser.add_argument("--turns-sort-direction", choices=("asc", "desc"), default="desc", help="Sort direction for --thread-turns.")
+    parser.add_argument("--turns-items-view", choices=("notLoaded", "summary", "full"), default="summary", help="Item detail for --thread-turns.")
+    parser.add_argument("--thread-items", default="", metavar="THREAD_ID", help="Call thread/items/list and print paginated persisted items.")
+    parser.add_argument("--items-turn-id", default="", metavar="TURN_ID", help="Restrict --thread-items to one turn.")
+    parser.add_argument("--items-cursor", default="", metavar="CURSOR", help="Pagination cursor for --thread-items.")
+    parser.add_argument("--items-limit", type=int, default=50, metavar="N", help="Page size for --thread-items (default 50).")
+    parser.add_argument("--background-terminals", default="", metavar="THREAD_ID", help="Call thread/backgroundTerminals/list for a loaded thread.")
+    parser.add_argument("--background-cursor", default="", metavar="CURSOR", help="Pagination cursor for --background-terminals.")
+    parser.add_argument("--background-limit", type=int, default=50, metavar="N", help="Page size for --background-terminals (default 50).")
+    parser.add_argument(
+        "--interrupt-turn",
+        nargs=2,
+        default=None,
+        metavar=("THREAD_ID", "TURN_ID"),
+        help="Call turn/interrupt for an in-flight turn.",
+    )
+    parser.add_argument(
+        "--set-thread-name",
+        nargs=2,
+        default=None,
+        metavar=("THREAD_ID", "NAME"),
+        help="Call thread/name/set; NAME is user-facing correlation only.",
+    )
     parser.add_argument("--include-turns", action="store_true", help="Include turns for --read-thread.")
-    parser.add_argument("--filter-cwd", default="", help="thread/list cwd filter.")
+    parser.add_argument("--filter-cwd", action="append", default=[], help="thread/list cwd filter; repeat for multiple paths.")
     parser.add_argument("--filter-title", default="", help="thread/list title filter.")
+    parser.add_argument("--threads-cursor", default="", metavar="CURSOR", help="Pagination cursor for --list-threads.")
+    parser.add_argument("--threads-limit", type=int, default=50, metavar="N", help="Page size for --list-threads (default 50).")
+    parser.add_argument("--threads-sort-key", choices=("created_at", "updated_at", "recency_at"), default="updated_at")
+    parser.add_argument("--threads-sort-direction", choices=("asc", "desc"), default="desc")
+    parser.add_argument("--model-provider", action="append", default=[], help="Repeatable thread/list modelProviders filter.")
+    parser.add_argument("--source-kind", action="append", default=[], help="Repeatable thread/list sourceKinds filter.")
+    parser.add_argument("--archived", action="store_true", help="List archived threads only.")
+    parser.add_argument("--use-state-db-only", action="store_true", help="Set thread/list useStateDbOnly=true.")
+    parser.add_argument("--parent-thread-id", default="", metavar="THREAD_ID")
+    parser.add_argument("--ancestor-thread-id", default="", metavar="THREAD_ID")
     parser.add_argument("--updated-after", default="", help="thread/list updatedAt lower bound.")
     parser.add_argument("--updated-before", default="", help="thread/list updatedAt upper bound.")
     return parser.parse_args()

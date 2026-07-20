@@ -514,6 +514,60 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ws.sent[0]["params"]["includeTurns"])
         self.assertEqual(result["thread"]["id"], "thread-1")
 
+    async def test_thread_diagnostic_methods_send_pagination_and_detail_params(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"data": []}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        await client.list_loaded_threads(1)
+        await client.list_thread_items("thread-1", 1, cursor="items-next", limit=7, turn_id="turn-1")
+        await client.list_thread_turns("thread-1", 1, cursor="turns-next", limit=8, sort_direction="asc", items_view="full")
+        await client.list_background_terminals("thread-1", 1, cursor="terminal-next", limit=9)
+        await client.set_thread_name("thread-1", "work item", 1)
+
+        self.assertEqual(ws.sent[0]["method"], "thread/loaded/list")
+        self.assertEqual(ws.sent[1], {"jsonrpc": "2.0", "id": ws.sent[1]["id"], "method": "thread/items/list", "params": {"threadId": "thread-1", "limit": 7, "cursor": "items-next", "turnId": "turn-1"}})
+        self.assertEqual(ws.sent[2]["params"]["itemsView"], "full")
+        self.assertEqual(ws.sent[2]["params"]["sortDirection"], "asc")
+        self.assertEqual(ws.sent[3]["params"]["cursor"], "terminal-next")
+        self.assertEqual(ws.sent[4]["params"], {"threadId": "thread-1", "name": "work item"})
+
+    async def test_thread_list_sends_all_supported_filters(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"data": [], "nextCursor": None}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        await client.list_threads(
+            1,
+            cursor="next",
+            limit=12,
+            sort_key="recency_at",
+            sort_direction="asc",
+            cwd=["C:/one", "C:/two"],
+            title="bug",
+            model_providers=["openai"],
+            source_kinds=["cli", "subAgent"],
+            archived=True,
+            use_state_db_only=True,
+            parent_thread_id="parent",
+        )
+        params = ws.sent[0]["params"]
+        self.assertEqual(params["cursor"], "next")
+        self.assertEqual(params["limit"], 12)
+        self.assertEqual(params["sortKey"], "recency_at")
+        self.assertEqual(params["cwd"], ["C:/one", "C:/two"])
+        self.assertEqual(params["modelProviders"], ["openai"])
+        self.assertEqual(params["sourceKinds"], ["cli", "subAgent"])
+        self.assertTrue(params["archived"])
+        self.assertTrue(params["useStateDbOnly"])
+        self.assertEqual(params["parentThreadId"], "parent")
+
     def test_extract_turn_normalizes_agent_messages(self) -> None:
         result = extract_turn(
             {

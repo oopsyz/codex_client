@@ -89,6 +89,23 @@ With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "de
 
 Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, concatenated agent-message `text`, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
 
+Read-only recovery and runtime diagnosis commands:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --list-loaded-threads
+python skills/codex-ws-client/scripts/codex_ws_client.py --thread-items THREAD_ID --items-turn-id TURN_ID --items-limit 100
+python skills/codex-ws-client/scripts/codex_ws_client.py --thread-turns THREAD_ID --turns-items-view full
+python skills/codex-ws-client/scripts/codex_ws_client.py --background-terminals THREAD_ID
+```
+
+`--list-threads` accepts `--threads-cursor`, `--threads-limit`, sort controls,
+`--model-provider`, `--source-kind`, `--archived`, `--use-state-db-only`, and
+parent/ancestor filters. Use the returned `nextCursor` with the next request.
+`--thread-items`, `--thread-turns`, and `--background-terminals` likewise expose
+their server cursors and page sizes. `--interrupt-turn THREAD_ID TURN_ID`
+explicitly requests cancellation of an in-flight turn; `--set-thread-name
+THREAD_ID NAME` sets a user-facing correlation name and is not an engine identity.
+
 ## Known limits
 
 - WebSocket only
