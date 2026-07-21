@@ -69,6 +69,20 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-thread TH
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID TURN_ID
 ```
 
+Stop a loaded thread and wait for its unload window:
+
+```bash
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --unload-thread THREAD_ID
+```
+
+Manage one thread's background terminals:
+
+```bash
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --list-background-terminals THREAD_ID
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --clean-background-terminals THREAD_ID
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --terminate-background-terminal THREAD_ID PROCESS_ID
+```
+
 Prompt from file:
 
 ```bash
@@ -88,6 +102,8 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-
 - `--ephemeral` threads are not resumable across connections.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
 - `--detach` returns `status: "detached"` for the client operation; inspect the returned turn later to determine whether the server completed it.
+- `--unload-thread` interrupts reported active turns, cleans background terminals, unsubscribes this client, and waits 30 minutes by default. `unload_status: "thread_closed"` is confirmation; elapsed time alone is not.
+- `--unsubscribe-thread` affects only the current connection. A fresh one-shot invocation commonly returns `notSubscribed`; use `--unload-thread` to cleanly tear down a smoke workspace.
 - In one-shot mode, stale resumed threads fail fast instead of silently switching context.
 - In REPL mode, `/new` starts a fresh thread.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.

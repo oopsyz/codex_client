@@ -28,10 +28,13 @@ from codex_ws_client import (  # noqa: E402
     TurnDeadline,
     ensure_thread,
     extract_turn,
+    active_turn_ids,
     run_detached_turn,
+    run_thread_unload,
     run_turn,
     run_repl,
     resolve_default_model,
+    parse_args,
     parse_headers,
 )
 
@@ -250,6 +253,81 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.sent[0]["method"], "thread/unsubscribe")
         self.assertEqual(ws.sent[0]["params"], {"threadId": "thread-1"})
 
+    async def test_background_terminals_clean_request_can_be_sent(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await client.clean_background_terminals("thread-1", timeout=1)
+        self.assertEqual(result, {})
+        self.assertEqual(ws.sent[0]["method"], "thread/backgroundTerminals/clean")
+        self.assertEqual(ws.sent[0]["params"], {"threadId": "thread-1"})
+
+    async def test_background_terminal_terminate_request_uses_app_server_process_id(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"terminated": True}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await client.terminate_background_terminal("thread-1", "42", timeout=1)
+        self.assertEqual(result, {"terminated": True})
+        self.assertEqual(ws.sent[0]["method"], "thread/backgroundTerminals/terminate")
+        self.assertEqual(ws.sent[0]["params"], {"threadId": "thread-1", "processId": "42"})
+
+    async def test_unload_thread_interrupts_then_cleans_unsubscribes_and_waits_for_close(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+                self.notifications = [
+                    {"method": "turn/completed", "params": {"turn": {"id": "turn-active", "status": "interrupted"}}},
+                    {"method": "thread/closed", "params": {"threadId": "thread-1"}},
+                ]
+
+            async def resume_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                self.calls.append(("thread/resume", params))
+                return {"thread": {"id": "thread-1"}}
+
+            async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool) -> dict[str, object]:
+                self.calls.append(("thread/read", {"threadId": thread_id, "includeTurns": include_turns}))
+                return {"thread": {"id": thread_id, "turns": [{"id": "turn-active", "status": "inProgress"}, {"id": "turn-done", "status": "completed"}]}}
+
+            async def interrupt_turn(self, thread_id: str, turn_id: str, timeout: float | None = None) -> dict[str, object]:
+                self.calls.append(("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}))
+                return {}
+
+            async def recv_json(self, timeout: float | None, deadline: object = None) -> dict[str, object]:
+                self.calls.append(("recv_json", timeout))
+                return self.notifications.pop(0)
+
+            async def clean_background_terminals(self, thread_id: str, timeout: float | None = None) -> dict[str, object]:
+                self.calls.append(("thread/backgroundTerminals/clean", {"threadId": thread_id}))
+                return {}
+
+            async def unsubscribe_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, object]:
+                self.calls.append(("thread/unsubscribe", {"threadId": thread_id}))
+                return {"status": "unsubscribed"}
+
+        client = FakeClient()
+        result = await run_thread_unload(client, "thread-1", timeout=1, grace_period=1800)
+        self.assertEqual(
+            [call[0] for call in client.calls],
+            ["thread/resume", "thread/read", "turn/interrupt", "recv_json", "thread/backgroundTerminals/clean", "thread/unsubscribe", "recv_json"],
+        )
+        self.assertEqual(result["interrupted_turn_ids"], ["turn-active"])
+        self.assertEqual(result["unsubscribe_status"], "unsubscribed")
+        self.assertEqual(result["unload_status"], "thread_closed")
+
+    def test_active_turn_ids_only_includes_in_progress_turns(self) -> None:
+        self.assertEqual(
+            active_turn_ids({"thread": {"turns": [{"id": "active", "status": "inProgress"}, {"id": "finished", "status": "completed"}, {"id": "missing"}]}}),
+            ["active"],
+        )
+
     async def test_turn_start_omits_cwd_when_not_provided(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -385,6 +463,31 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         proc = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0)
         self.assertIn("Codex app-server WebSocket client", proc.stdout)
+
+    def test_lifecycle_cli_commands_parse_with_requested_names(self) -> None:
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--list-background-terminals", "thread-1"]):
+            args = parse_args()
+        self.assertEqual(args.background_terminals, "thread-1")
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--clean-background-terminals",
+                "thread-1",
+                "--terminate-background-terminal",
+                "thread-1",
+                "42",
+                "--unsubscribe-thread",
+                "thread-1",
+                "--list-loaded-threads",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(args.clean_background_terminals, "thread-1")
+        self.assertEqual(args.terminate_background_terminal, ["thread-1", "42"])
+        self.assertEqual(args.unsubscribe_thread, "thread-1")
+        self.assertTrue(args.list_loaded_threads)
 
     def test_resolve_default_model_reads_codex_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

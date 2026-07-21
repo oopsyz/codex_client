@@ -106,6 +106,35 @@ their server cursors and page sizes. `--interrupt-turn THREAD_ID TURN_ID`
 explicitly requests cancellation of an in-flight turn; `--set-thread-name
 THREAD_ID NAME` sets a user-facing correlation name and is not an engine identity.
 
+Lifecycle commands for release and smoke-workspace cleanup:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --list-loaded-threads
+python skills/codex-ws-client/scripts/codex_ws_client.py --list-background-terminals THREAD_ID
+python skills/codex-ws-client/scripts/codex_ws_client.py --terminate-background-terminal THREAD_ID PROCESS_ID
+python skills/codex-ws-client/scripts/codex_ws_client.py --clean-background-terminals THREAD_ID
+python skills/codex-ws-client/scripts/codex_ws_client.py --unsubscribe-thread THREAD_ID
+```
+
+`--list-background-terminals` is the preferred name for the existing
+`--background-terminals` command. `PROCESS_ID` is the app-server process ID
+returned by the list request, not an operating-system PID. `--unsubscribe-thread`
+only removes this connection's subscription; a fresh one-shot CLI connection
+usually returns `notSubscribed`. Use `--unload-thread` for the complete
+interrupt, clean, unsubscribe, and no-subscriber grace-period workflow.
+
+`--unload-thread THREAD_ID` is the lifecycle teardown operation. It opens the
+thread without adding a prompt, interrupts every `inProgress` turn returned by
+`thread/read`, waits for each cancellation notification, calls
+`thread/backgroundTerminals/clean`, then calls `thread/unsubscribe`. The
+unsubscribe response is authoritative about whether this connection was
+subscribed; only an `unsubscribed` response starts the client-side wait. It then
+keeps the connection open for the app-server's 30-minute no-subscriber
+inactivity grace period (`--unload-grace-period` overrides this; `0` skips it).
+A returned `unload_status: "thread_closed"` confirms that the server unloaded
+the thread. `grace_period_elapsed` means only that the client waited: another
+subscriber or new thread activity can prevent the server from unloading it.
+
 ## Known limits
 
 - WebSocket only

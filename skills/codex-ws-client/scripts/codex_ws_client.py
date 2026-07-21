@@ -21,6 +21,7 @@ import websockets
 
 DEFAULT_URI = "ws://127.0.0.1:8765"
 DEFAULT_MODEL = "gpt-5"
+DEFAULT_UNLOAD_GRACE_PERIOD = 30 * 60
 APP_SERVER_OVERLOADED = -32001
 
 EXIT_SUCCESS = 0
@@ -404,6 +405,18 @@ class ProtocolClient:
     async def unsubscribe_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
         return await self.request("thread/unsubscribe", {"threadId": thread_id}, timeout=timeout)
 
+    async def clean_background_terminals(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
+        return await self.request("thread/backgroundTerminals/clean", {"threadId": thread_id}, timeout=timeout)
+
+    async def terminate_background_terminal(
+        self, thread_id: str, process_id: str, timeout: float | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "thread/backgroundTerminals/terminate",
+            {"threadId": thread_id, "processId": process_id},
+            timeout=timeout,
+        )
+
     async def close(self) -> None:
         close = getattr(self.ws, "close", None)
         if close is None:
@@ -720,6 +733,109 @@ def make_detach_result(thread_id: str, turn_id: str, turn_status: str, unsubscri
     }
 
 
+def active_turn_ids(thread_response: Mapping[str, Any]) -> list[str]:
+    """Return the IDs of in-progress turns reported by ``thread/read``."""
+    thread = thread_response.get("thread", {})
+    if not isinstance(thread, Mapping):
+        return []
+    turns = thread.get("turns", [])
+    if not isinstance(turns, list):
+        return []
+    active: list[str] = []
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        status = str(turn.get("status", "")).replace("_", "").lower()
+        turn_id = str(turn.get("id", ""))
+        if status == "inprogress" and turn_id:
+            active.append(turn_id)
+    return active
+
+
+async def wait_for_interrupted_turns(
+    client: ProtocolClient,
+    thread_id: str,
+    turn_ids: list[str],
+    timeout: float | None,
+) -> None:
+    """Wait for cancellation notifications before starting the unload grace period."""
+    pending = set(turn_ids)
+    while pending:
+        message = await client.recv_json(timeout)
+        if message.get("method") != "turn/completed":
+            continue
+        turn = message.get("params", {}).get("turn", {})
+        if turn.get("id") == "":
+            continue
+        if turn.get("id") in pending:
+            pending.remove(turn["id"])
+
+
+async def wait_for_thread_unload(
+    client: ProtocolClient,
+    thread_id: str,
+    grace_period: float,
+    message_timeout: float | None,
+) -> str:
+    """Keep the connection alive through the documented no-subscriber grace period."""
+    if grace_period <= 0:
+        return "wait_skipped"
+    deadline = TurnDeadline(grace_period)
+    while True:
+        try:
+            message = await client.recv_json(deadline.remaining_timeout(message_timeout), deadline)
+        except asyncio.TimeoutError:
+            if deadline.deadline is not None and monotonic() >= deadline.deadline:
+                return "grace_period_elapsed"
+            continue
+        method = message.get("method")
+        params = message.get("params", {})
+        if params.get("threadId") != thread_id:
+            continue
+        if method == "thread/closed":
+            return "thread_closed"
+        if method == "thread/status/changed" and params.get("status", {}).get("type") == "notLoaded":
+            return "thread_closed"
+
+
+async def run_thread_unload(
+    client: ProtocolClient,
+    thread_id: str,
+    timeout: float | None,
+    grace_period: float,
+) -> dict[str, Any]:
+    """Interrupt, clean, unsubscribe, and wait for one thread's unload window.
+
+    ``thread/unsubscribe`` only affects the current connection. The resume call
+    opens the target thread without adding a prompt or overrides; its unsubscribe
+    response is authoritative about whether this connection was subscribed. A
+    closed notification proves unload; elapsed time does not prove this client
+    was the last subscriber.
+    """
+    await client.resume_thread({"threadId": thread_id}, timeout)
+    thread = await client.read_thread(thread_id, timeout, include_turns=True)
+    interrupted_turn_ids = active_turn_ids(thread)
+    for turn_id in interrupted_turn_ids:
+        await client.interrupt_turn(thread_id, turn_id, timeout=timeout)
+    if interrupted_turn_ids:
+        await wait_for_interrupted_turns(client, thread_id, interrupted_turn_ids, timeout)
+    clean_result = await client.clean_background_terminals(thread_id, timeout)
+    unsubscribe_result = await client.unsubscribe_thread(thread_id, timeout)
+    unsubscribe_status = str(unsubscribe_result.get("status", "unknown"))
+    unload_status = "not_waited"
+    if unsubscribe_status == "unsubscribed":
+        unload_status = await wait_for_thread_unload(client, thread_id, grace_period, timeout)
+    return {
+        "thread_id": thread_id,
+        "status": "unload_requested",
+        "interrupted_turn_ids": interrupted_turn_ids,
+        "background_terminals_cleaned": clean_result,
+        "unsubscribe_status": unsubscribe_status,
+        "unload_status": unload_status,
+        "unload_grace_period_seconds": grace_period,
+    }
+
+
 async def ensure_thread(
     client: ProtocolClient,
     args: argparse.Namespace,
@@ -960,7 +1076,11 @@ async def run_client(args: argparse.Namespace) -> int:
             args.thread_turns,
             args.thread_items,
             args.background_terminals,
+            args.clean_background_terminals,
+            args.terminate_background_terminal,
+            args.unsubscribe_thread,
             args.interrupt_turn,
+            args.unload_thread,
             args.set_thread_name,
         )
     )
@@ -969,6 +1089,9 @@ async def run_client(args: argparse.Namespace) -> int:
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.unload_grace_period < 0:
+        print("--unload-grace-period must be zero or greater.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if not args.repl and not inspection_operation and not prompt.strip():
         print("A prompt is required unless --repl or an inspection/thread-management command is used.", file=sys.stderr)
@@ -1066,9 +1189,26 @@ async def run_client(args: argparse.Namespace) -> int:
                 )
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
+            if args.clean_background_terminals:
+                result = await client.clean_background_terminals(args.clean_background_terminals, timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.terminate_background_terminal:
+                thread_id, process_id = args.terminate_background_terminal
+                result = await client.terminate_background_terminal(thread_id, process_id, timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.unsubscribe_thread:
+                result = await client.unsubscribe_thread(args.unsubscribe_thread, timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
             if args.interrupt_turn:
                 thread_id, turn_id = args.interrupt_turn
                 result = await client.interrupt_turn(thread_id, turn_id, timeout=timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.unload_thread:
+                result = await run_thread_unload(client, args.unload_thread, timeout, args.unload_grace_period)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
             if args.set_thread_name:
@@ -1188,15 +1328,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--items-turn-id", default="", metavar="TURN_ID", help="Restrict --thread-items to one turn.")
     parser.add_argument("--items-cursor", default="", metavar="CURSOR", help="Pagination cursor for --thread-items.")
     parser.add_argument("--items-limit", type=int, default=50, metavar="N", help="Page size for --thread-items (default 50).")
-    parser.add_argument("--background-terminals", default="", metavar="THREAD_ID", help="Call thread/backgroundTerminals/list for a loaded thread.")
-    parser.add_argument("--background-cursor", default="", metavar="CURSOR", help="Pagination cursor for --background-terminals.")
-    parser.add_argument("--background-limit", type=int, default=50, metavar="N", help="Page size for --background-terminals (default 50).")
+    parser.add_argument(
+        "--background-terminals",
+        "--list-background-terminals",
+        dest="background_terminals",
+        default="",
+        metavar="THREAD_ID",
+        help="Call thread/backgroundTerminals/list for a loaded thread.",
+    )
+    parser.add_argument("--background-cursor", default="", metavar="CURSOR", help="Pagination cursor for --list-background-terminals.")
+    parser.add_argument("--background-limit", type=int, default=50, metavar="N", help="Page size for --list-background-terminals (default 50).")
+    parser.add_argument(
+        "--clean-background-terminals",
+        default="",
+        metavar="THREAD_ID",
+        help="Call thread/backgroundTerminals/clean to stop all background terminals for a loaded thread.",
+    )
+    parser.add_argument(
+        "--terminate-background-terminal",
+        nargs=2,
+        default=None,
+        metavar=("THREAD_ID", "PROCESS_ID"),
+        help="Call thread/backgroundTerminals/terminate for one app-server process ID.",
+    )
+    parser.add_argument(
+        "--unsubscribe-thread",
+        default="",
+        metavar="THREAD_ID",
+        help="Call thread/unsubscribe for this connection; use --unload-thread for the complete teardown flow.",
+    )
     parser.add_argument(
         "--interrupt-turn",
         nargs=2,
         default=None,
         metavar=("THREAD_ID", "TURN_ID"),
         help="Call turn/interrupt for an in-flight turn.",
+    )
+    parser.add_argument(
+        "--unload-thread",
+        default="",
+        metavar="THREAD_ID",
+        help="Interrupt active turns, clean background terminals, unsubscribe, and wait for the no-subscriber unload grace period.",
+    )
+    parser.add_argument(
+        "--unload-grace-period",
+        type=float,
+        default=DEFAULT_UNLOAD_GRACE_PERIOD,
+        metavar="SECONDS",
+        help="Seconds to wait after --unload-thread unsubscribes (default: 1800; 0 skips the wait).",
     )
     parser.add_argument(
         "--set-thread-name",

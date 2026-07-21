@@ -125,6 +125,7 @@ Persistence:
 - `--ephemeral` disables persistence
 - `--thread-id` only makes sense for non-ephemeral threads
 - `--detach` starts a turn, calls `thread/unsubscribe`, prints IDs, and exits without waiting for completion
+- `--unload-thread THREAD_ID` opens the thread, interrupts active turns, cleans background terminals, then requests unsubscription and waits for the server's unload grace period when the server confirms this connection was unsubscribed
 
 Important:
 
@@ -222,6 +223,26 @@ Check the detached thread later:
 ```powershell
 python skills/codex-ws-client/scripts/codex_ws_client.py --read-thread THREAD_ID --include-turns
 ```
+
+Stop and unload a thread from this client connection:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --unload-thread THREAD_ID
+```
+
+This waits 30 minutes by default after the client unsubscribes, matching the app-server no-subscriber inactivity grace period. The JSON `unload_status` is `thread_closed` only when the server emits that notification; `grace_period_elapsed` means the wait completed but cannot prove this was the last subscriber. Use `--unload-grace-period 0` only when the caller intentionally skips that wait.
+
+Manage background terminals without stopping the app-server:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --list-loaded-threads
+python skills/codex-ws-client/scripts/codex_ws_client.py --list-background-terminals THREAD_ID
+python skills/codex-ws-client/scripts/codex_ws_client.py --terminate-background-terminal THREAD_ID PROCESS_ID
+python skills/codex-ws-client/scripts/codex_ws_client.py --clean-background-terminals THREAD_ID
+python skills/codex-ws-client/scripts/codex_ws_client.py --unsubscribe-thread THREAD_ID
+```
+
+`PROCESS_ID` is the app-server `processId` returned by `--list-background-terminals`, not an operating-system PID. `--unsubscribe-thread` only affects the invoking connection; use `--unload-thread` when automation needs the complete interrupt, clean, unsubscribe, and grace-period workflow.
 
 Read one persisted turn in normalized form:
 
