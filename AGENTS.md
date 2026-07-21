@@ -73,6 +73,18 @@ With `--detach`, the client sends `turn/start`, calls `thread/unsubscribe`, prin
 
 **Exit codes:** 0 success, 1 turn failure, 2 bad args, 3 connection failure, 4 timeout, 5 parse error, 130 SIGINT.
 
+## Experimental: `thread/turns/list` support
+
+Added via `--thread-turns THREAD_ID` (experimental). Pages through a stored thread's turn history without resuming it. Optional `--turns-cursor CURSOR` and `--turns-limit N` (default 50).
+
+```bash
+# Basic usage
+python skills/codex-ws-client/scripts/codex_ws_client.py --thread-turns THREAD_ID
+
+# With pagination
+python skills/codex-ws-client/scripts/codex_ws_client.py --thread-turns THREAD_ID --turns-limit 10 --turns-cursor "abc123"
+```
+
 ## Key Files
 
 - [skills/codex-ws-client/scripts/codex_ws_client.py](skills/codex-ws-client/scripts/codex_ws_client.py) — full implementation
