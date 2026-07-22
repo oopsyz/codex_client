@@ -255,6 +255,27 @@ raw turn object, and any server error. If the turn is not present, it returns
 `status: "not_found"`. This is a transport/read result; callers decide what
 the returned text means for their workflow.
 
+Correct an active turn without interrupting it or starting a different turn:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --steer-turn THREAD_ID TURN_ID "Use the corrected scope."
+```
+
+This sends `turn/steer` with `TURN_ID` as the app-server's required
+`expectedTurnId` precondition. It does not resume the thread or start a new
+turn, so a stale ID fails instead of changing a newer active turn.
+
+Wait for a turn to reach a terminal status with normalized JSON output:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --wait-turn THREAD_ID TURN_ID
+```
+
+`--wait-turn` polls persisted state without resuming or subscribing to the
+thread. The output includes `wait_status` (`terminal` or `timeout`) and
+`poll_count`; the default overall wait is 300 seconds (exit code 4 on timeout).
+Use `--wait-turn-timeout` and `--wait-turn-poll-interval` to adjust it.
+
 ## REPL Commands
 
 Available in REPL mode:

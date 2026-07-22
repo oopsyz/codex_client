@@ -29,10 +29,12 @@ from codex_ws_client import (  # noqa: E402
     ensure_thread,
     extract_turn,
     active_turn_ids,
+    is_terminal_turn_status,
     run_detached_turn,
     run_thread_unload,
     run_turn,
     run_repl,
+    wait_for_turn_terminal,
     resolve_default_model,
     parse_args,
     parse_headers,
@@ -54,6 +56,8 @@ SCHEMA_MANIFEST = {
   "v2/ThreadStartResponse.json": "185c3a50c61ae83bc8ac9556e06c2bb759be5a7182017e1121d5992d7c2d2eca",
   "v2/TurnStartParams.json": "51c6606fb4b7c4efb8fb102afebcc30cc2ee8fe37bdb9da87be9a16880c2fc0a",
   "v2/TurnStartResponse.json": "d0fdbfb0058b2f964b17d770fa476819c4a2f574c552e703982c3568c016179f",
+  "v2/TurnSteerParams.json": "aa1a293afb470b3aace5a5636608e4f20927c4a218258100abc35a48906244fe",
+  "v2/TurnSteerResponse.json": "c0cee0b0c57af980fe2727679fbf2d3110ba28e8c9328f40d402fcc44ecb87bf",
 }
 
 
@@ -239,6 +243,56 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         ws.recv = recv  # type: ignore[method-assign]
         await client.request("turn/interrupt", {"threadId": "t", "turnId": "u"}, timeout=1, retry_overload=False)
         self.assertEqual(ws.sent[0]["method"], "turn/interrupt")
+
+    async def test_turn_steer_uses_the_expected_active_turn_without_resuming(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"turnId": "turn-1"}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await client.steer_turn("thread-1", "turn-1", "Correct the last instruction.", timeout=1)
+        self.assertEqual(result, {"turnId": "turn-1"})
+        self.assertEqual(ws.sent[0]["method"], "turn/steer")
+        self.assertEqual(
+            ws.sent[0]["params"],
+            {
+                "threadId": "thread-1",
+                "expectedTurnId": "turn-1",
+                "input": [{"type": "text", "text": "Correct the last instruction."}],
+            },
+        )
+
+    async def test_wait_for_turn_terminal_polls_persisted_state_without_resuming(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self.responses = [
+                    {"thread": {"id": "thread-1", "turns": [{"id": "turn-1", "status": "inProgress"}]}},
+                    {"thread": {"id": "thread-1", "turns": [{"id": "turn-1", "status": "completed", "items": [{"type": "agentMessage", "text": "done"}]}]}},
+                ]
+
+            async def read_thread(
+                self, thread_id: str, timeout: float | None, *, include_turns: bool, deadline: object = None
+            ) -> dict[str, object]:
+                self.calls.append({"threadId": thread_id, "includeTurns": include_turns})
+                return self.responses.pop(0)
+
+        client = FakeClient()
+        code, result = await wait_for_turn_terminal(client, "thread-1", "turn-1", timeout=1, wait_timeout=1, poll_interval=0)
+        self.assertEqual(code, EXIT_SUCCESS)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["text"], "done")
+        self.assertEqual(result["wait_status"], "terminal")
+        self.assertEqual(result["poll_count"], 2)
+        self.assertEqual(client.calls, [{"threadId": "thread-1", "includeTurns": True}, {"threadId": "thread-1", "includeTurns": True}])
+
+    def test_terminal_turn_status_matches_app_server_values(self) -> None:
+        self.assertTrue(is_terminal_turn_status("completed"))
+        self.assertTrue(is_terminal_turn_status("interrupted"))
+        self.assertTrue(is_terminal_turn_status("failed"))
+        self.assertFalse(is_terminal_turn_status("inProgress"))
 
     async def test_thread_unsubscribe_request_can_be_sent(self) -> None:
         ws = MockWebSocket([])
@@ -489,6 +543,31 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.unsubscribe_thread, "thread-1")
         self.assertTrue(args.list_loaded_threads)
 
+    def test_active_turn_cli_commands_parse_with_requested_names(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--steer-turn",
+                "thread-1",
+                "turn-1",
+                "Use the corrected scope.",
+                "--wait-turn-timeout",
+                "45",
+                "--wait-turn-poll-interval",
+                "2",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(args.steer_turn, ["thread-1", "turn-1", "Use the corrected scope."])
+        self.assertIsNone(args.wait_turn)
+        self.assertEqual(args.wait_turn_timeout, 45)
+        self.assertEqual(args.wait_turn_poll_interval, 2)
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--wait-turn", "thread-1", "turn-1"]):
+            args = parse_args()
+        self.assertEqual(args.wait_turn, ["thread-1", "turn-1"])
+
     def test_resolve_default_model_reads_codex_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             codex_dir = Path(tmp) / ".codex"
@@ -718,6 +797,8 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
                 thread_unsubscribe_schema = json.load(fh)
             with (schema_dir / "v2" / "TurnStartParams.json").open("r", encoding="utf-8") as fh:
                 turn_start_schema = json.load(fh)
+            with (schema_dir / "v2" / "TurnSteerParams.json").open("r", encoding="utf-8") as fh:
+                turn_steer_schema = json.load(fh)
             validate(
                 instance={"cwd": "C:/repo", "searchTerm": "alpha", "sortKey": "updated_at", "sortDirection": "desc"},
                 schema=thread_list_schema,
@@ -729,6 +810,14 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             validate(
                 instance={"threadId": "thread-1", "approvalPolicy": "never", "input": [{"type": "text", "text": "prompt"}]},
                 schema=turn_start_schema,
+            )
+            validate(
+                instance={
+                    "threadId": "thread-1",
+                    "expectedTurnId": "turn-1",
+                    "input": [{"type": "text", "text": "correct the active turn"}],
+                },
+                schema=turn_steer_schema,
             )
             validate(
                 instance={"threadId": "thread-1"},

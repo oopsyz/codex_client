@@ -22,6 +22,8 @@ import websockets
 DEFAULT_URI = "ws://127.0.0.1:8765"
 DEFAULT_MODEL = "gpt-5"
 DEFAULT_UNLOAD_GRACE_PERIOD = 30 * 60
+DEFAULT_WAIT_TURN_TIMEOUT = 300.0
+DEFAULT_WAIT_TURN_POLL_INTERVAL = 1.0
 APP_SERVER_OVERLOADED = -32001
 
 EXIT_SUCCESS = 0
@@ -402,6 +404,24 @@ class ProtocolClient:
             retry_overload=False,
         )
 
+    async def steer_turn(self, thread_id: str, turn_id: str, prompt: str, timeout: float | None = None) -> dict[str, Any]:
+        """Submit input to the specified active turn without starting another turn.
+
+        ``expectedTurnId`` is an app-server precondition.  In particular, this
+        method does not resume the thread or issue ``turn/start``: a stale
+        caller cannot accidentally steer a newer active turn.
+        """
+        return await self.request(
+            "turn/steer",
+            {
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{"type": "text", "text": prompt}],
+            },
+            timeout=timeout,
+            retry_overload=False,
+        )
+
     async def unsubscribe_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
         return await self.request("thread/unsubscribe", {"threadId": thread_id}, timeout=timeout)
 
@@ -425,8 +445,20 @@ class ProtocolClient:
         if inspect.isawaitable(result):
             await result
 
-    async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, Any]:
-        return await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns}, timeout=timeout)
+    async def read_thread(
+        self,
+        thread_id: str,
+        timeout: float | None,
+        *,
+        include_turns: bool = False,
+        deadline: TurnDeadline | None = None,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": include_turns},
+            timeout=timeout,
+            deadline=deadline,
+        )
 
     async def list_loaded_threads(self, timeout: float | None) -> dict[str, Any]:
         return await self.request("thread/loaded/list", {}, timeout=timeout)
@@ -594,6 +626,54 @@ def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, 
         result["turn"] = dict(candidate)
         return result
     return None
+
+
+def is_terminal_turn_status(status: object) -> bool:
+    """Return whether an app-server turn status is terminal."""
+    return str(status or "").replace("_", "").lower() in {"completed", "interrupted", "failed"}
+
+
+def make_wait_turn_result(result: Mapping[str, Any], *, wait_status: str, poll_count: int) -> dict[str, Any]:
+    normalized = dict(result)
+    normalized["wait_status"] = wait_status
+    normalized["poll_count"] = poll_count
+    return normalized
+
+
+async def wait_for_turn_terminal(
+    client: ProtocolClient,
+    thread_id: str,
+    turn_id: str,
+    *,
+    timeout: float | None,
+    wait_timeout: float | None,
+    poll_interval: float,
+) -> tuple[int, dict[str, Any]]:
+    """Poll the persisted turn until it is terminal, without resuming it.
+
+    Reading the persisted thread avoids changing subscriptions or the active
+    turn binding.  A missing turn is treated as a transient read race until
+    the caller's overall wait deadline expires.
+    """
+    deadline = TurnDeadline(wait_timeout)
+    latest: dict[str, Any] = {"thread_id": thread_id, "turn_id": turn_id, "status": "not_found", "text": ""}
+    poll_count = 0
+    while True:
+        try:
+            deadline.remaining_timeout(None)
+            response = await client.read_thread(thread_id, timeout, include_turns=True, deadline=deadline)
+        except asyncio.TimeoutError:
+            return EXIT_TIMEOUT, make_wait_turn_result(latest, wait_status="timeout", poll_count=poll_count)
+        poll_count += 1
+        extracted = extract_turn(response, turn_id)
+        if extracted is not None:
+            latest = extracted
+            if is_terminal_turn_status(extracted.get("status")):
+                return EXIT_SUCCESS, make_wait_turn_result(extracted, wait_status="terminal", poll_count=poll_count)
+        try:
+            await asyncio.sleep(deadline.remaining_timeout(poll_interval))
+        except asyncio.TimeoutError:
+            return EXIT_TIMEOUT, make_wait_turn_result(latest, wait_status="timeout", poll_count=poll_count)
 
 
 async def default_notification_handler(ws: Any, message: dict[str, Any], verbosity: int = 0) -> bool:
@@ -1080,6 +1160,8 @@ async def run_client(args: argparse.Namespace) -> int:
             args.terminate_background_terminal,
             args.unsubscribe_thread,
             args.interrupt_turn,
+            args.steer_turn,
+            args.wait_turn,
             args.unload_thread,
             args.set_thread_name,
         )
@@ -1092,6 +1174,12 @@ async def run_client(args: argparse.Namespace) -> int:
         return EXIT_BAD_ARGS
     if args.unload_grace_period < 0:
         print("--unload-grace-period must be zero or greater.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.wait_turn_timeout < 0:
+        print("--wait-turn-timeout must be zero or greater.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.wait_turn_poll_interval <= 0:
+        print("--wait-turn-poll-interval must be greater than zero.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if not args.repl and not inspection_operation and not prompt.strip():
         print("A prompt is required unless --repl or an inspection/thread-management command is used.", file=sys.stderr)
@@ -1207,6 +1295,33 @@ async def run_client(args: argparse.Namespace) -> int:
                 result = await client.interrupt_turn(thread_id, turn_id, timeout=timeout)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
+            if args.steer_turn:
+                thread_id, turn_id, prompt = args.steer_turn
+                result = await client.steer_turn(thread_id, turn_id, prompt, timeout=timeout)
+                safe_print(
+                    json.dumps(
+                        {
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "status": "steered",
+                            "steered_turn_id": str(result.get("turnId") or turn_id),
+                        },
+                        indent=2,
+                    )
+                )
+                return EXIT_SUCCESS
+            if args.wait_turn:
+                thread_id, turn_id = args.wait_turn
+                code, result = await wait_for_turn_terminal(
+                    client,
+                    thread_id,
+                    turn_id,
+                    timeout=timeout,
+                    wait_timeout=args.wait_turn_timeout if args.wait_turn_timeout > 0 else None,
+                    poll_interval=args.wait_turn_poll_interval,
+                )
+                safe_print(json.dumps(result, indent=2))
+                return code
             if args.unload_thread:
                 result = await run_thread_unload(client, args.unload_thread, timeout, args.unload_grace_period)
                 safe_print(json.dumps(result, indent=2))
@@ -1363,6 +1478,34 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar=("THREAD_ID", "TURN_ID"),
         help="Call turn/interrupt for an in-flight turn.",
+    )
+    parser.add_argument(
+        "--steer-turn",
+        nargs=3,
+        default=None,
+        metavar=("THREAD_ID", "TURN_ID", "PROMPT"),
+        help="Call turn/steer for the specified active turn without resuming the thread or starting a new turn.",
+    )
+    parser.add_argument(
+        "--wait-turn",
+        nargs=2,
+        default=None,
+        metavar=("THREAD_ID", "TURN_ID"),
+        help="Poll persisted turn state until terminal and print normalized JSON without resuming the thread.",
+    )
+    parser.add_argument(
+        "--wait-turn-timeout",
+        type=float,
+        default=DEFAULT_WAIT_TURN_TIMEOUT,
+        metavar="SECONDS",
+        help="Overall --wait-turn deadline in seconds (default: 300; 0 disables it).",
+    )
+    parser.add_argument(
+        "--wait-turn-poll-interval",
+        type=float,
+        default=DEFAULT_WAIT_TURN_POLL_INTERVAL,
+        metavar="SECONDS",
+        help="Seconds between persisted-state reads for --wait-turn (default: 1).",
     )
     parser.add_argument(
         "--unload-thread",

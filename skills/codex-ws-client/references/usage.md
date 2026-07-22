@@ -89,6 +89,22 @@ With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "de
 
 Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, concatenated agent-message `text`, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
 
+Correct an active turn without creating another turn or changing its binding:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --steer-turn THREAD_ID TURN_ID "Use the corrected scope."
+```
+
+`--steer-turn` calls `turn/steer` with the supplied `TURN_ID` as the app-server's `expectedTurnId` precondition. It does not call `thread/resume` or `turn/start`; a stale ID fails instead of steering a different active turn.
+
+Wait for a detached or otherwise active turn without a separate read/retry loop:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --wait-turn THREAD_ID TURN_ID
+```
+
+This polls persisted `thread/read` state (it does not resume or subscribe to the thread) until `completed`, `failed`, or `interrupted`. It always emits normalized JSON with `wait_status` (`terminal` or `timeout`) and `poll_count`; timeout defaults to 300 seconds and returns exit code 4. Use `--wait-turn-timeout SECONDS` and `--wait-turn-poll-interval SECONDS` to tune it.
+
 Read-only recovery and runtime diagnosis commands:
 
 ```powershell
