@@ -48,7 +48,7 @@ Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-cl
 After a project-local install, run the client from that path:
 
 ```powershell
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "Summarize this repo"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "Summarize this repo"
 ```
 
 After a global install, use `$HOME/.codex/skills/codex-ws-client/scripts/codex_ws_client.py` instead.
@@ -113,11 +113,14 @@ It handles:
 Fresh thread:
 
 - if `--thread-id` is omitted, the client creates a new thread
+- `--sandbox {read-only,workspace-write,danger-full-access}` is required
+- `danger-full-access` is never selected implicitly
 
 Resumed thread:
 
 - if `--thread-id` is provided, the client calls `thread/resume`
 - resumed turns use `--resume-timeout`
+- `--sandbox` cannot be used with `--thread-id`; the existing thread's policy cannot change, so start a fresh thread to choose a sandbox
 
 Persistence:
 
@@ -156,6 +159,7 @@ Current JSON shape includes:
 - `turn_id`
 - `status`
 - `text`
+- effective `sandbox`
 - optional `error`
 - optional `notifications`
 - optional `metrics`
@@ -171,13 +175,13 @@ Current JSON shape includes:
 One-shot prompt:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py "Summarize this repo"
+python skills/codex-ws-client/scripts/codex_ws_client.py --sandbox read-only "Summarize this repo"
 ```
 
 JSON output for tool use:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json "List the main entrypoints"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "List the main entrypoints"
 ```
 
 Reuse a persisted thread:
@@ -189,34 +193,34 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --thread-id THREAD_ID "
 Interactive REPL:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --repl --print-thread-id
+python skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --print-thread-id
 ```
 
 REPL with interactive approvals:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --repl --interactive-approvals
+python skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --interactive-approvals
 ```
 
 Prompt from file:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --prompt-file prompt.txt
+python skills/codex-ws-client/scripts/codex_ws_client.py --sandbox read-only --prompt-file prompt.txt
 ```
 
 Structured output with trace:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-file trace.jsonl "Return metadata"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --ndjson-file trace.jsonl "Return metadata"
 ```
 
 Fire-and-forget long-running work:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "Run the long task"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --detach "Run the long task"
 ```
 
-Without `--json`, `--detach` prints `THREAD_ID=`, `TURN_ID=`, `TURN_STATUS=`, and `UNSUBSCRIBE_STATUS=` to stdout because those IDs are the command's primary result.
+Without `--json`, `--detach` prints `THREAD_ID=`, `TURN_ID=`, `TURN_STATUS=`, `UNSUBSCRIBE_STATUS=`, and `SANDBOX=` to stdout because those values are the command's primary result.
 
 Check the detached thread later:
 
@@ -373,7 +377,7 @@ Avoid:
 Recommended one-shot pattern:
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json --connect-timeout 10 --timeout 120 "YOUR PROMPT"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --connect-timeout 10 --timeout 120 "YOUR PROMPT"
 ```
 
 Recommended resumed-thread pattern:
@@ -381,6 +385,8 @@ Recommended resumed-thread pattern:
 ```powershell
 python skills/codex-ws-client/scripts/codex_ws_client.py --json --thread-id THREAD_ID --resume-timeout 300 "YOUR PROMPT"
 ```
+
+Do not add `--sandbox` to the resumed-thread command. If the sandbox must change, omit `--thread-id` and create a fresh thread with an explicit sandbox.
 
 ## Known Limits
 

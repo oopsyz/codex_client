@@ -40,6 +40,7 @@ It handles:
 
 Fresh thread:
 - omit `--thread-id`
+- explicitly choose `--sandbox read-only`, `--sandbox workspace-write`, or `--sandbox danger-full-access`
 
 Model selection:
 - `--model` overrides the configured model
@@ -51,6 +52,7 @@ Persisted thread:
 - default creation mode persists threads
 - reuse with `--thread-id`
 - resumed turns use `--resume-timeout`
+- do not pass `--sandbox`; the existing thread's sandbox policy cannot change
 - use `--detach` for fire-and-forget turns that will be inspected later with `--read-thread THREAD_ID --include-turns`
 
 Ephemeral thread:
@@ -82,10 +84,11 @@ Interactive approvals:
 `--json` emits a structured object with:
 - ids and final text
 - status and optional error
+- effective sandbox
 - notification summaries
 - metrics such as latency and token counts
 
-With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, and `unsubscribe_status`. The detached status only means that the client unsubscribed successfully; it is not the final turn status.
+With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, `unsubscribe_status`, and effective `sandbox`. The detached status only means that the client unsubscribed successfully; it is not the final turn status. Plain detached output includes `SANDBOX=` as well.
 
 Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, concatenated agent-message `text`, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
 

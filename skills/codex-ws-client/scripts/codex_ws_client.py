@@ -36,6 +36,7 @@ EXIT_SIGINT = 130
 
 
 BOM = "﻿"
+SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 
 _ndjson_file = None
 _interactive_approvals_enabled = False
@@ -773,22 +774,45 @@ def install_sigint_handler(loop: asyncio.AbstractEventLoop) -> None:
     signal.signal(signal.SIGINT, windows_handler)
 
 
-def make_thread_params(args: argparse.Namespace, cwd: str | None, developer_instructions: str) -> dict[str, Any]:
+def make_thread_params(
+    args: argparse.Namespace,
+    cwd: str | None,
+    developer_instructions: str,
+    *,
+    include_sandbox: bool = True,
+) -> dict[str, Any]:
     params: dict[str, Any] = {
         "approvalPolicy": "never",
-        "sandbox": args.sandbox,
         "model": args.model,
         "personality": args.personality,
         "developerInstructions": developer_instructions,
         "ephemeral": args.ephemeral,
     }
+    if include_sandbox:
+        if not args.sandbox:
+            raise ValueError("--sandbox is required when creating a new prompt thread.")
+        params["sandbox"] = args.sandbox
     if cwd is not None:
         params["cwd"] = cwd
     return params
 
 
-def make_json_result(thread_id: str, turn_id: str, text: str, status: str, error: str | None = None) -> dict[str, Any]:
-    result: dict[str, Any] = {"thread_id": thread_id, "turn_id": turn_id, "status": status, "text": text}
+def make_json_result(
+    thread_id: str,
+    turn_id: str,
+    text: str,
+    status: str,
+    error: str | None = None,
+    *,
+    sandbox: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "status": status,
+        "text": text,
+        "sandbox": sandbox,
+    }
     if error is not None:
         result["error"] = error
     return result
@@ -803,14 +827,48 @@ def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, 
     return params
 
 
-def make_detach_result(thread_id: str, turn_id: str, turn_status: str, unsubscribe_status: str) -> dict[str, Any]:
+def make_detach_result(
+    thread_id: str,
+    turn_id: str,
+    turn_status: str,
+    unsubscribe_status: str,
+    *,
+    sandbox: str | None = None,
+) -> dict[str, Any]:
     return {
         "thread_id": thread_id,
         "turn_id": turn_id,
         "status": "detached",
         "turn_status": turn_status,
         "unsubscribe_status": unsubscribe_status,
+        "sandbox": sandbox,
     }
+
+
+def thread_sandbox(thread_response: Mapping[str, Any]) -> str | None:
+    thread = thread_response.get("thread", {})
+    if not isinstance(thread, Mapping):
+        return None
+    sandbox = thread.get("sandbox", thread.get("sandboxPolicy"))
+    if isinstance(sandbox, Mapping):
+        sandbox = sandbox.get("type")
+    return sandbox if isinstance(sandbox, str) else None
+
+
+def sandbox_validation_error(args: argparse.Namespace, inspection_operation: bool) -> str | None:
+    """Return a CLI error for sandbox selection, if prompt dispatch is unsafe."""
+    if inspection_operation:
+        return None
+    if args.thread_id:
+        if args.sandbox:
+            return (
+                "Cannot use --sandbox when resuming an existing thread because its sandbox policy cannot change. "
+                "Start a fresh thread without --thread-id to choose a sandbox."
+            )
+        return None
+    if not args.sandbox:
+        return "--sandbox is required when creating a new prompt thread; choose one of: read-only, workspace-write, danger-full-access."
+    return None
 
 
 def active_turn_ids(thread_response: Mapping[str, Any]) -> list[str]:
@@ -926,16 +984,18 @@ async def ensure_thread(
     force_new: bool = False,
 ) -> tuple[str, bool]:
     if args.thread_id and not force_new:
-        params = make_thread_params(args, cwd, args.instructions or "Answer concisely.")
+        params = make_thread_params(args, cwd, args.instructions or "Answer concisely.", include_sandbox=False)
         params["threadId"] = args.thread_id
         result = await client.resume_thread(params, resume_timeout)
         status = result.get("thread", {}).get("status", {})
         status_type = status.get("type") if isinstance(status, dict) else status
         if status_type in {"systemError", "notLoaded"}:
             raise RpcError(-32000, f"thread/resume returned unusable status: {status_type}", method="thread/resume")
+        args.effective_sandbox = thread_sandbox(result)
         return args.thread_id, True
     result = await client.start_thread(make_thread_params(args, cwd, args.instructions or "Answer concisely."), timeout)
     thread_id = result["thread"]["id"]
+    args.effective_sandbox = args.sandbox
     if args.print_thread_id:
         print(f"THREAD_ID={thread_id}", file=sys.stderr)
     return thread_id, False
@@ -995,7 +1055,14 @@ async def run_turn(
                 status = params.get("turn", {}).get("status", "completed")
                 text = "".join(deltas).strip() or completed_text.strip()
                 if status == "failed":
-                    result = make_json_result(thread_id, turn_id, "", "failed", params.get("turn", {}).get("error", "Unknown turn failure"))
+                    result = make_json_result(
+                        thread_id,
+                        turn_id,
+                        "",
+                        "failed",
+                        params.get("turn", {}).get("error", "Unknown turn failure"),
+                        sandbox=getattr(args, "effective_sandbox", None),
+                    )
                     await _close_client()
                     return EXIT_TURN_FAILURE, result if args.json else result
                 if args.summary:
@@ -1005,7 +1072,13 @@ async def run_turn(
                     Path(args.out).write_text(text, encoding="utf-8")
                 if args.json:
                     await _close_client()
-                    return EXIT_SUCCESS, make_json_result(thread_id, turn_id, text, status)
+                    return EXIT_SUCCESS, make_json_result(
+                        thread_id,
+                        turn_id,
+                        text,
+                        status,
+                        sandbox=getattr(args, "effective_sandbox", None),
+                    )
                 if args.no_stream:
                     safe_print(text)
                 elif text:
@@ -1014,7 +1087,14 @@ async def run_turn(
                 await _close_client()
                 return EXIT_SUCCESS, None
             elif method == "turn/failed":
-                result = make_json_result(thread_id, turn_id, "", "failed", params.get("error", "Unknown turn failure"))
+                result = make_json_result(
+                    thread_id,
+                    turn_id,
+                    "",
+                    "failed",
+                    params.get("error", "Unknown turn failure"),
+                    sandbox=getattr(args, "effective_sandbox", None),
+                )
                 _cancel.reset()
                 await _close_client()
                 return EXIT_TURN_FAILURE, result if args.json else result
@@ -1052,7 +1132,13 @@ async def run_detached_turn(
     unsubscribe = await client.unsubscribe_thread(thread_id, timeout=timeout)
     unsubscribe_status = str(unsubscribe.get("status", "unknown"))
     await _close_client()
-    return make_detach_result(thread_id, turn_id, str(turn_status), unsubscribe_status)
+    return make_detach_result(
+        thread_id,
+        turn_id,
+        str(turn_status),
+        unsubscribe_status,
+        sandbox=getattr(args, "effective_sandbox", None),
+    )
 
 
 async def run_repl(
@@ -1171,6 +1257,10 @@ async def run_client(args: argparse.Namespace) -> int:
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    sandbox_error = sandbox_validation_error(args, inspection_operation)
+    if sandbox_error:
+        print(sandbox_error, file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.unload_grace_period < 0:
         print("--unload-grace-period must be zero or greater.", file=sys.stderr)
@@ -1343,6 +1433,7 @@ async def run_client(args: argparse.Namespace) -> int:
                     safe_print(f"TURN_ID={result['turn_id']}")
                     safe_print(f"TURN_STATUS={result['turn_status']}")
                     safe_print(f"UNSUBSCRIBE_STATUS={result['unsubscribe_status']}")
+                    safe_print(f"SANDBOX={result['sandbox'] or 'unknown'}")
                 return EXIT_SUCCESS
             code, json_result = await run_turn(client, args, thread_id, cwd, prompt, resume_timeout if reused else timeout, turn_deadline)
             if json_result is not None:
@@ -1361,7 +1452,16 @@ async def run_client(args: argparse.Namespace) -> int:
         raise
     except RpcError as exc:
         if args.json:
-            safe_print(json.dumps({"status": "error", "error": exc.to_dict()}, indent=2))
+            safe_print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error": exc.to_dict(),
+                        "sandbox": getattr(args, "effective_sandbox", None),
+                    },
+                    indent=2,
+                )
+            )
         else:
             print(f"RPC error [{exc.error_code}]: {exc.message}", file=sys.stderr)
         return EXIT_TURN_FAILURE
@@ -1390,7 +1490,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--cwd", default="", help="Explicit working directory to send; omitted lets app-server choose its default.")
     parser.add_argument("--model", default="", help="Model to use. If omitted, read ~/.codex/config.toml and fall back to the client default.")
-    parser.add_argument("--sandbox", default="read-only")
+    parser.add_argument(
+        "--sandbox",
+        choices=SANDBOX_CHOICES,
+        default=None,
+        help="Sandbox policy for a new prompt thread; required for new threads and cannot be changed when resuming.",
+    )
     parser.add_argument("--personality", default="pragmatic")
     parser.add_argument("--instructions", default="")
     parser.add_argument("--ephemeral", action="store_true")

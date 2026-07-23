@@ -35,14 +35,14 @@ These use bash syntax (as executed by Claude agents). For PowerShell, see README
 One-shot:
 
 ```bash
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "Summarize this repo"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "Summarize this repo"
 ```
 
 Multi-turn (chain via `thread_id` in JSON output — preferred over `--print-thread-id`):
 
 ```bash
 # Round 1 — capture thread_id from JSON result
-result=$(python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "First prompt")
+result=$(python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "First prompt")
 thread_id=$(echo "$result" | python -c "import json,sys; print(json.load(sys.stdin)['thread_id'])")
 
 # Round 2+ — reuse thread
@@ -52,7 +52,7 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --thread-
 REPL (preferred for interactive multi-round sessions — single connection, no reconnect overhead):
 
 ```bash
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --interactive-approvals
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --interactive-approvals
 ```
 
 Resume a persisted thread:
@@ -64,7 +64,7 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --thread-
 Fire-and-forget long-running work:
 
 ```bash
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "Run the long task"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --detach "Run the long task"
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-thread THREAD_ID --include-turns
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID TURN_ID
 ```
@@ -86,13 +86,13 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --terminate-back
 Prompt from file:
 
 ```bash
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --prompt-file prompt.txt
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --sandbox read-only --prompt-file prompt.txt
 ```
 
 Trace protocol traffic:
 
 ```bash
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-file trace.jsonl "Return metadata"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --ndjson-file trace.jsonl "Return metadata"
 ```
 
 ## Important behavior
@@ -100,6 +100,8 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-
 - Transport is WebSocket only.
 - The client does not start `codex app-server`; the server must already be running.
 - `--ephemeral` threads are not resumable across connections.
+- New prompt threads require explicit `--sandbox read-only`, `--sandbox workspace-write`, or `--sandbox danger-full-access`.
+- `--sandbox` is rejected when resuming because a thread's sandbox policy cannot change; start a fresh thread instead.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
 - `--detach` returns `status: "detached"` for the client operation; inspect the returned turn later to determine whether the server completed it.
 - `--unload-thread` interrupts reported active turns, cleans background terminals, unsubscribes this client, and waits 30 minutes by default. `unload_status: "thread_closed"` is confirmation; elapsed time alone is not.
@@ -114,6 +116,7 @@ With `--json`, expect:
 - `thread_id`
 - `turn_id`
 - `status`
+- effective `sandbox`
 - `text`
 - optional `error`
 - optional `notifications`

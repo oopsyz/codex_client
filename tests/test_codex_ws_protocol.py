@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stderr
+import io
 import hashlib
 import json
 import os
@@ -34,6 +36,8 @@ from codex_ws_client import (  # noqa: E402
     run_thread_unload,
     run_turn,
     run_repl,
+    run_client,
+    sandbox_validation_error,
     wait_for_turn_terminal,
     resolve_default_model,
     parse_args,
@@ -124,13 +128,20 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def recv() -> str:
-            return json.dumps(response_for(ws.sent[-1], {"thread": {"id": "thread-1", "status": {"type": "idle"}}}))
+            return json.dumps(
+                response_for(
+                    ws.sent[-1],
+                    {"thread": {"id": "thread-1", "sandbox": "workspace-write", "status": {"type": "idle"}}},
+                )
+            )
 
         ws.recv = recv  # type: ignore[method-assign]
         thread_id, reused = await ensure_thread(client, args, "C:/repo", 1, 1)
         self.assertEqual((thread_id, reused), ("thread-1", True))
         self.assertEqual(ws.sent[0]["method"], "thread/resume")
         self.assertEqual(ws.sent[0]["params"]["cwd"], "C:/repo")
+        self.assertNotIn("sandbox", ws.sent[0]["params"])
+        self.assertEqual(args.effective_sandbox, "workspace-write")
 
     async def test_resume_thread_omits_cwd_when_not_provided(self) -> None:
         ws = MockWebSocket([])
@@ -147,7 +158,12 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def recv() -> str:
-            return json.dumps(response_for(ws.sent[-1], {"thread": {"id": "thread-1", "status": {"type": "idle"}}}))
+            return json.dumps(
+                response_for(
+                    ws.sent[-1],
+                    {"thread": {"id": "thread-1", "sandbox": "workspace-write", "status": {"type": "idle"}}},
+                )
+            )
 
         ws.recv = recv  # type: ignore[method-assign]
         thread_id, reused = await ensure_thread(client, args, None, 1, 1)
@@ -184,6 +200,8 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((thread_id, reused), ("fresh-1", False))
         self.assertEqual(client.calls[0][0], "start")
         self.assertEqual(client.calls[0][2], 1)
+        self.assertEqual(client.calls[0][1]["sandbox"], "read-only")
+        self.assertEqual(args.effective_sandbox, "read-only")
 
     async def test_interleaved_notifications_are_buffered_until_matching_response(self) -> None:
         ws = MockWebSocket([])
@@ -422,10 +440,38 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ws.closed)
         self.assertEqual(ws.close_calls, 1)
 
+    async def test_json_turn_result_includes_effective_sandbox(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(
+            no_stream=True,
+            json=True,
+            output_schema="",
+            summary=False,
+            out="",
+            effective_sandbox="workspace-write",
+        )
+        calls = 0
+
+        async def recv() -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(response_for(ws.sent[-1], {"turn": {"id": "turn-1"}}))
+            return json.dumps(
+                {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}}
+            )
+
+        ws.recv = recv  # type: ignore[method-assign]
+        exit_code, result = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
+        self.assertEqual(exit_code, EXIT_SUCCESS)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["sandbox"], "workspace-write")
+
     async def test_detached_turn_starts_then_unsubscribes(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
-        args = SimpleNamespace(output_schema="")
+        args = SimpleNamespace(output_schema="", effective_sandbox="danger-full-access")
 
         async def recv() -> str:
             if ws.sent[-1]["method"] == "turn/start":
@@ -442,6 +488,7 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
                 "status": "detached",
                 "turn_status": "inProgress",
                 "unsubscribe_status": "unsubscribed",
+                "sandbox": "danger-full-access",
             },
         )
         self.assertEqual([sent["method"] for sent in ws.sent], ["turn/start", "thread/unsubscribe"])
@@ -517,6 +564,44 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         proc = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0)
         self.assertIn("Codex app-server WebSocket client", proc.stdout)
+
+    def test_sandbox_argument_is_explicit_and_restricted(self) -> None:
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--sandbox", "danger-full-access", "prompt"]):
+            args = parse_args()
+        self.assertEqual(args.sandbox, "danger-full-access")
+
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "prompt"]):
+            args = parse_args()
+        self.assertIsNone(args.sandbox)
+
+    def test_inspection_commands_are_exempt_from_sandbox_selection(self) -> None:
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--list-threads"]):
+            args = parse_args()
+        self.assertIsNone(sandbox_validation_error(args, inspection_operation=True))
+
+    async def test_new_prompt_thread_requires_sandbox_before_connecting(self) -> None:
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "prompt"]):
+            args = parse_args()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), mock.patch("codex_ws_client.websockets.connect") as connect:
+            result = await run_client(args)
+        self.assertEqual(result, 2)
+        self.assertIn("--sandbox is required", stderr.getvalue())
+        connect.assert_not_called()
+
+    async def test_resumed_prompt_rejects_sandbox_before_connecting(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--thread-id", "thread-1", "--sandbox", "workspace-write", "prompt"],
+        ):
+            args = parse_args()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), mock.patch("codex_ws_client.websockets.connect") as connect:
+            result = await run_client(args)
+        self.assertEqual(result, 2)
+        self.assertIn("Start a fresh thread", stderr.getvalue())
+        connect.assert_not_called()
 
     def test_lifecycle_cli_commands_parse_with_requested_names(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--list-background-terminals", "thread-1"]):

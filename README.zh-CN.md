@@ -44,7 +44,7 @@ Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-cl
 项目级安装后，从对应路径运行客户端：
 
 ```powershell
-python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json "Summarize this repo"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "Summarize this repo"
 ```
 
 全局安装后，改用 `$HOME/.codex/skills/codex-ws-client/scripts/codex_ws_client.py`。
@@ -107,6 +107,8 @@ ws://127.0.0.1:8765
 
 - 如果传入 `--thread-id`，客户端会调用 `thread/resume`
 - 恢复线程后的轮次会使用 `--resume-timeout`
+- 创建新提示线程时必须显式指定 `--sandbox read-only`、`--sandbox workspace-write` 或 `--sandbox danger-full-access`
+- 恢复已有线程时不能传入 `--sandbox`；如需更改沙箱策略，请创建新线程
 
 持久化：
 
@@ -117,7 +119,7 @@ ws://127.0.0.1:8765
 注意：
 
 - `--ephemeral` 线程无法跨连接恢复
-- `--detach` 返回的 `status: "detached"` 只表示客户端已取消订阅并断开，不表示轮次已经完成
+- `--detach` 返回的 `status: "detached"` 只表示客户端已取消订阅并断开，不表示轮次已经完成；JSON 和普通输出都会包含有效的 `sandbox`
 - 如果恢复线程失败，单次调用模式会快速失败
 - 在 REPL 模式下，某些过期线程场景可能会回退为新线程
 
@@ -142,6 +144,7 @@ JSON：
 - `turn_id`
 - `status`
 - `text`
+- 有效的 `sandbox`
 - 可选的 `error`
 - 可选的 `notifications`
 - 可选的 `metrics`
@@ -157,13 +160,13 @@ JSON：
 单次提示：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py "Summarize this repo"
+python skills/codex-ws-client/scripts/codex_ws_client.py --sandbox read-only "Summarize this repo"
 ```
 
 供工具使用的 JSON 输出：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json "List the main entrypoints"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "List the main entrypoints"
 ```
 
 复用已持久化线程：
@@ -183,25 +186,25 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID T
 交互式 REPL：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --repl --print-thread-id
+python skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --print-thread-id
 ```
 
 带交互式审批的 REPL：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --repl --interactive-approvals
+python skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --interactive-approvals
 ```
 
 从文件读取提示：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --prompt-file prompt.txt
+python skills/codex-ws-client/scripts/codex_ws_client.py --sandbox read-only --prompt-file prompt.txt
 ```
 
 带跟踪的结构化输出：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json --ndjson-file trace.jsonl "Return metadata"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --ndjson-file trace.jsonl "Return metadata"
 ```
 
 ## REPL 命令
@@ -298,7 +301,7 @@ REPL 覆盖行为：
 推荐的单次调用模式：
 
 ```powershell
-python skills/codex-ws-client/scripts/codex_ws_client.py --json --connect-timeout 10 --timeout 120 "YOUR PROMPT"
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --connect-timeout 10 --timeout 120 "YOUR PROMPT"
 ```
 
 推荐的恢复线程模式：
