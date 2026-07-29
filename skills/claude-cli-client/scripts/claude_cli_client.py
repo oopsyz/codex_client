@@ -19,6 +19,16 @@ DEFAULT_PERMISSION_MODE = "default"
 DEFAULT_RESUME_TIMEOUT = 300.0
 BOM = "\ufeff"
 
+PERMISSION_MODES = (
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+    "default",
+    "dontAsk",
+    "plan",
+)
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 # Exit codes
 EXIT_SUCCESS = 0
 EXIT_TURN_FAILURE = 1
@@ -126,12 +136,19 @@ def build_claude_command(
         "--output-format",
         "stream-json",
     ]
-    if not args.no_stream:
+    # Detached runs have no reader for the deltas, so skip the extra partial-message traffic.
+    if not args.no_stream and not args.detach:
         command.append("--include-partial-messages")
-    if resume:
+    if args.include_hook_events:
+        command.append("--include-hook-events")
+    if args.continue_session:
+        command.append("--continue")
+    elif resume:
         command.extend(["--resume", session_id])
     else:
         command.extend(["--session-id", session_id])
+    if args.fork_session:
+        command.append("--fork-session")
     if args.model:
         command.extend(["--model", args.model])
     if args.permission_mode:
@@ -146,19 +163,33 @@ def build_claude_command(
         command.extend(["--max-budget-usd", str(args.max_budget_usd)])
     if args.agent:
         command.extend(["--agent", args.agent])
+    if args.agents:
+        command.extend(["--agents", args.agents])
     if args.effort:
         command.extend(["--effort", args.effort])
     if args.fallback_model:
         command.extend(["--fallback-model", args.fallback_model])
+    if args.session_name:
+        command.extend(["--name", args.session_name])
     if args.no_session_persistence:
         command.append("--no-session-persistence")
     if args.disable_slash_commands:
         command.append("--disable-slash-commands")
+    if args.strict_mcp_config:
+        command.append("--strict-mcp-config")
+    if args.exclude_dynamic_system_prompt_sections:
+        command.append("--exclude-dynamic-system-prompt-sections")
+    if args.bare:
+        command.append("--bare")
+    if args.tools:
+        command.extend(["--tools", args.tools])
+    append_repeatable_args(command, "--betas", args.betas)
     append_repeatable_args(command, "--add-dir", args.add_dir)
     append_repeatable_args(command, "--allowed-tools", args.allowed_tools)
     append_repeatable_args(command, "--disallowed-tools", args.disallowed_tools)
     append_repeatable_args(command, "--mcp-config", args.mcp_config)
     append_repeatable_args(command, "--plugin-dir", args.plugin_dir)
+    append_repeatable_args(command, "--plugin-url", args.plugin_url)
     append_repeatable_args(command, "--settings", args.settings)
     append_repeatable_args(command, "--setting-sources", args.setting_sources)
     command.append(prompt)
@@ -468,6 +499,91 @@ def run_turn(
     return EXIT_SUCCESS, None, session_seen
 
 
+def make_detach_result(session_id: str, pid: int, log_path: str) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "thread_id": session_id,
+        "session_id": session_id,
+        "turn_id": "",
+        "status": "detached",
+        "text": "",
+        "pid": pid,
+    }
+    if log_path:
+        result["log_path"] = log_path
+    return result
+
+
+def run_detached_turn(
+    args: argparse.Namespace,
+    cwd: str,
+    prompt: str,
+    session_id: str,
+    resume: bool,
+    verbosity: int,
+) -> tuple[int, dict[str, Any] | None]:
+    """Spawn the Claude CLI, print identifiers, and exit without awaiting the turn.
+
+    The child keeps running after this process exits, so its stream is redirected to
+    ``--detach-log`` (or discarded) rather than to our own stdout.
+    """
+    command = build_claude_command(args, cwd, prompt, session_id, resume)
+    log_event(verbosity, f"Starting detached Claude turn with session {session_id}")
+    log_line(verbosity, "cmd", json.dumps(command))
+    write_ndjson("command", command)
+
+    log_handle = None
+    log_path = ""
+    if args.detach_log:
+        try:
+            log_handle = open(args.detach_log, "a", encoding="utf-8")
+            log_path = str(Path(args.detach_log).resolve())
+        except OSError as exc:
+            print(f"Failed to open --detach-log file: {exc}", file=sys.stderr)
+            return EXIT_BAD_ARGS, None
+
+    stdout_target = log_handle if log_handle is not None else subprocess.DEVNULL
+    creationflags = 0
+    start_new_session = False
+    if sys.platform.startswith("win"):
+        # Detach from this console so the child survives our exit.
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess, "DETACHED_PROCESS", 0
+        )
+    else:
+        start_new_session = True
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=stdout_target,
+            stderr=subprocess.STDOUT if log_handle is not None else subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+            start_new_session=start_new_session,
+        )
+    except OSError as exc:
+        print(f"Failed to start Claude CLI: {exc}", file=sys.stderr)
+        return EXIT_CONNECTION_FAILURE, None
+    finally:
+        # The child inherited its own duplicate of the handle, so ours is safe to drop.
+        if log_handle is not None:
+            log_handle.close()
+
+    log_event(verbosity, f"Detached with pid {process.pid}")
+    if args.json:
+        return EXIT_SUCCESS, make_detach_result(session_id, process.pid, log_path)
+
+    safe_print(f"SESSION_ID={session_id}")
+    safe_print(f"PID={process.pid}")
+    if log_path:
+        safe_print(f"LOG={log_path}")
+    return EXIT_SUCCESS, None
+
+
 def run_repl(
     args: argparse.Namespace,
     cwd: str,
@@ -536,6 +652,8 @@ def parse_args() -> argparse.Namespace:
             "  2. This client wraps the Claude CLI; it is not a WebSocket transport.\n"
             "  3. `prompt` is required unless `--repl` is used.\n"
             "  4. `--session-id` reuses the same Claude conversation via `--resume`.\n"
+            "  5. `--detach` starts the turn in the background and exits immediately;\n"
+            "     resume it later with the printed session ID.\n"
             "\n"
             "Exit codes:\n"
             "  0    Success\n"
@@ -553,23 +671,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-bin", default=DEFAULT_CLAUDE_BIN, help=f"Path to the Claude CLI binary. Default: {DEFAULT_CLAUDE_BIN}")
     parser.add_argument("--cwd", default=".", help="Working directory used when spawning the Claude CLI. Default: current directory.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Optional Claude model alias or full name.")
-    parser.add_argument("--permission-mode", default=DEFAULT_PERMISSION_MODE, help=f"Claude permission mode. Default: {DEFAULT_PERMISSION_MODE}")
+    parser.add_argument("--permission-mode", default=DEFAULT_PERMISSION_MODE, choices=PERMISSION_MODES, help=f"Claude permission mode. Default: {DEFAULT_PERMISSION_MODE}")
     parser.add_argument("--system-prompt", default="", help="Override the Claude system prompt.")
     parser.add_argument("--append-system-prompt", default="", help="Append additional system prompt text.")
     parser.add_argument("--agent", default="", help="Claude agent to use for the session.")
-    parser.add_argument("--effort", default="", help="Claude effort level: low, medium, high, or max.")
+    parser.add_argument("--agents", default="", help="JSON object defining custom agents, passed through to `claude --agents`.")
+    parser.add_argument("--effort", default="", choices=("",) + EFFORT_LEVELS, help=f"Claude effort level. One of: {', '.join(EFFORT_LEVELS)}.")
     parser.add_argument("--fallback-model", default="", help="Fallback model to use with the Claude CLI.")
     parser.add_argument("--json-schema", default="", help="Optional JSON schema string passed through to `claude --json-schema`.")
     parser.add_argument("--session-id", default="", help="Existing Claude session ID to resume. If omitted, a new UUID is generated.")
+    parser.add_argument("--session-name", default="", metavar="NAME", help="Display name for the session, passed through to `claude --name`.")
+    parser.add_argument("--continue-session", "--continue", action="store_true", dest="continue_session", help="Continue the most recent conversation in --cwd instead of using a session ID.")
+    parser.add_argument("--fork-session", action="store_true", help="When resuming, create a new session ID instead of reusing the original.")
     parser.add_argument("--print-session-id", action="store_true", help="Print `SESSION_ID=...` to stderr when a session is created or reused.")
     parser.add_argument("--no-session-persistence", action="store_true", help="Disable Claude session persistence for fresh sessions.")
     parser.add_argument("--no-stream", action="store_true", help="Do not print partial deltas. Print the final assistant text once at end of turn.")
     parser.add_argument("--repl", action="store_true", help="Interactive loop that reuses a Claude session via `--resume`. Supports `/session`, `/new`, and `/exit`.")
+    parser.add_argument("--detach", action="store_true", help="Spawn the turn in a detached process, print the session ID and PID, and exit without waiting for completion.")
+    parser.add_argument("--detach-log", default="", metavar="FILE", help="With --detach, append the child's stream-json stdout/stderr to this file. Without it the child's output is discarded.")
     parser.add_argument("--json", action="store_true", help="Output a structured JSON envelope instead of plain text. Includes session_id, turn_id, status, and text.")
     parser.add_argument("--timeout", type=float, default=0, help="Timeout in seconds for fresh sessions. 0 means no timeout.")
     parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help=f"Timeout in seconds for resumed sessions. 0 means no timeout. Default: {DEFAULT_RESUME_TIMEOUT}")
     parser.add_argument("--max-budget-usd", type=float, default=0.0, help="Optional max budget passed to the Claude CLI.")
     parser.add_argument("--disable-slash-commands", action="store_true", help="Disable Claude slash commands and skills for the spawned session.")
+    parser.add_argument("--strict-mcp-config", action="store_true", help="Only use MCP servers from --mcp-config, ignoring other MCP configurations.")
+    parser.add_argument("--include-hook-events", action="store_true", help="Include hook lifecycle events in the stream-json output.")
+    parser.add_argument("--exclude-dynamic-system-prompt-sections", action="store_true", help="Move per-machine system prompt sections into the first user message to improve prompt-cache reuse.")
+    parser.add_argument("--bare", action="store_true", help="Minimal mode: skip hooks, LSP, plugin sync, auto-memory, and CLAUDE.md auto-discovery.")
+    parser.add_argument("--tools", default="", help='Built-in tool set for the session, e.g. "Bash,Edit,Read". Use "" for none and "default" for all.')
+    parser.add_argument("--betas", action="append", default=[], help="Repeatable beta header to include in API requests (API key users only).")
+    parser.add_argument("--plugin-url", action="append", default=[], help="Repeatable plugin .zip URL to load for this session only.")
     parser.add_argument("--add-dir", action="append", default=[], help="Repeatable additional directory to allow Claude tool access to.")
     parser.add_argument("--allowed-tools", action="append", default=[], help="Repeatable allowed-tools value passed through to the Claude CLI.")
     parser.add_argument("--disallowed-tools", action="append", default=[], help="Repeatable disallowed-tools value passed through to the Claude CLI.")
@@ -592,6 +723,30 @@ def main() -> int:
 
     if args.repl and args.prompt_file == "-":
         print("Cannot use --prompt-file - with --repl; stdin is needed for interactive input.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+
+    if args.detach and args.repl:
+        print("Cannot use --detach with --repl.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+
+    if args.detach and args.no_session_persistence:
+        print(
+            "Cannot use --detach with --no-session-persistence because detached work must "
+            "be persisted for later resume.",
+            file=sys.stderr,
+        )
+        return EXIT_BAD_ARGS
+
+    if args.detach_log and not args.detach:
+        print("--detach-log only applies with --detach.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+
+    if args.continue_session and args.session_id:
+        print("Cannot combine --continue with --session-id; pick one resume strategy.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+
+    if args.continue_session and args.repl:
+        print("Cannot use --continue with --repl; use --session-id to resume a specific session.", file=sys.stderr)
         return EXIT_BAD_ARGS
 
     try:
@@ -618,6 +773,19 @@ def main() -> int:
     try:
         if args.repl:
             return run_repl(args=args, cwd=cwd, initial_session_id=session_id, verbosity=verbosity)
+
+        if args.detach:
+            exit_code, json_result = run_detached_turn(
+                args=args,
+                cwd=cwd,
+                prompt=prompt,
+                session_id=session_id,
+                resume=bool(args.session_id),
+                verbosity=verbosity,
+            )
+            if json_result is not None:
+                safe_print(json.dumps(json_result, indent=2))
+            return exit_code
 
         turn_timeout = (None if args.resume_timeout == 0 else args.resume_timeout) if args.session_id else timeout
         exit_code, json_result, _ = run_turn(

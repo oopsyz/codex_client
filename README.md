@@ -53,12 +53,18 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox
 
 After a global install, use `$HOME/.codex/skills/codex-ws-client/scripts/codex_ws_client.py` instead.
 
-Claude CLI sibling client:
+Claude CLI sibling client (lets Codex talk to Claude Code, the mirror of this client):
 
 ```powershell
 Copy-Item -Recurse -Force skills/claude-cli-client .codex/skills/claude-cli-client
 python .codex/skills/claude-cli-client/scripts/claude_cli_client.py --json "Summarize this repo"
 ```
+
+It wraps `claude -p --output-format stream-json` and normalizes the event stream into the
+same envelope shape this client emits (`session_id`/`thread_id`, `turn_id`, `status`, `text`),
+so both directions of the Codex/Claude bridge share one output contract. It supports
+`--session-id` resume, `--repl`, and `--detach` for background turns. See
+[skills/claude-cli-client/references/usage.md](skills/claude-cli-client/references/usage.md).
 
 ## When To Use It
 
@@ -247,6 +253,14 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --unsubscribe-thread TH
 ```
 
 `PROCESS_ID` is the app-server `processId` returned by `--list-background-terminals`, not an operating-system PID. `--unsubscribe-thread` only affects the invoking connection; use `--unload-thread` when automation needs the complete interrupt, clean, unsubscribe, and grace-period workflow.
+
+Archive a thread after the engine has durably recorded its review bundle:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --archive-thread THREAD_ID
+```
+
+The command waits for and returns the server's matching `thread/archived` notification. `--unarchive-thread THREAD_ID` is reserved for explicit operator recovery. `--delete-thread THREAD_ID` permanently removes the server-side thread log and is never used by routine cleanup.
 
 Read one persisted turn in normalized form:
 

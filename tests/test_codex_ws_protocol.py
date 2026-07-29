@@ -325,6 +325,74 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.sent[0]["method"], "thread/unsubscribe")
         self.assertEqual(ws.sent[0]["params"], {"threadId": "thread-1"})
 
+    async def test_thread_archive_captures_notification_arriving_before_rpc_response(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        received = 0
+
+        async def recv() -> str:
+            nonlocal received
+            received += 1
+            if received == 1:
+                return json.dumps({"jsonrpc": "2.0", "method": "thread/archived", "params": {"threadId": "thread-1"}})
+            return json.dumps(response_for(ws.sent[-1], {"status": "archived"}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await client.archive_thread("thread-1", timeout=1)
+        self.assertEqual(ws.sent[0]["method"], "thread/archive")
+        self.assertEqual(ws.sent[0]["params"], {"threadId": "thread-1"})
+        self.assertEqual(result["archive_result"], {"status": "archived"})
+        self.assertEqual(result["archived_notification"]["method"], "thread/archived")
+        self.assertEqual(result["archived_notification"]["params"], {"threadId": "thread-1"})
+
+    async def test_thread_archive_waits_for_notification_after_rpc_response(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        received = 0
+
+        async def recv() -> str:
+            nonlocal received
+            received += 1
+            if received == 1:
+                return json.dumps(response_for(ws.sent[-1], {"status": "archived"}))
+            return json.dumps({"jsonrpc": "2.0", "method": "thread/archived", "params": {"threadId": "thread-1"}})
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await client.archive_thread("thread-1", timeout=1)
+        self.assertEqual(received, 2)
+        self.assertEqual(result["archive_result"], {"status": "archived"})
+        self.assertEqual(result["archived_notification"]["method"], "thread/archived")
+
+    async def test_thread_archive_times_out_without_archived_notification(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        received = 0
+
+        async def recv() -> str:
+            nonlocal received
+            received += 1
+            if received == 1:
+                return json.dumps(response_for(ws.sent[-1], {"status": "archived"}))
+            raise asyncio.TimeoutError()
+
+        ws.recv = recv  # type: ignore[method-assign]
+        with self.assertRaises(asyncio.TimeoutError):
+            await client.archive_thread("thread-1", timeout=0.01)
+        self.assertEqual(ws.sent[0]["method"], "thread/archive")
+
+    async def test_thread_unarchive_and_delete_are_thin_rpc_wrappers(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps(response_for(ws.sent[-1], {"ok": True}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        self.assertEqual(await client.unarchive_thread("thread-1", timeout=1), {"ok": True})
+        self.assertEqual(await client.delete_thread("thread-1", timeout=1), {"ok": True})
+        self.assertEqual([sent["method"] for sent in ws.sent], ["thread/unarchive", "thread/delete"])
+        self.assertEqual([sent["params"] for sent in ws.sent], [{"threadId": "thread-1"}, {"threadId": "thread-1"}])
+
     async def test_background_terminals_clean_request_can_be_sent(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -627,6 +695,24 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.terminate_background_terminal, ["thread-1", "42"])
         self.assertEqual(args.unsubscribe_thread, "thread-1")
         self.assertTrue(args.list_loaded_threads)
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--archive-thread",
+                "thread-1",
+                "--unarchive-thread",
+                "thread-2",
+                "--delete-thread",
+                "thread-3",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(args.archive_thread, "thread-1")
+        self.assertEqual(args.unarchive_thread, "thread-2")
+        self.assertEqual(args.delete_thread, "thread-3")
 
     def test_active_turn_cli_commands_parse_with_requested_names(self) -> None:
         with mock.patch.object(

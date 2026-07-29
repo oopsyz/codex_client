@@ -9,6 +9,7 @@ Use it when:
 - you want stable JSON output instead of Claude's raw event stream
 - you want session reuse with `--session-id`
 - you want a minimal REPL over Claude `--resume`
+- you want to launch a long turn in the background with `--detach`
 
 Avoid it when:
 - you need a WebSocket transport
@@ -44,6 +45,28 @@ Resumed session:
 Non-persistent session:
 - use `--no-session-persistence`
 - cannot be resumed later
+- rejected together with `--detach`
+
+Continued session:
+- use `--continue` to pick up the most recent conversation in `--cwd`
+- mutually exclusive with `--session-id` and `--repl`
+
+Forked session:
+- add `--fork-session` alongside `--session-id` to branch instead of reusing the original ID
+
+## Detached turns
+
+`--detach` starts the turn and returns immediately:
+
+```bash
+python scripts/claude_cli_client.py --json --detach --detach-log run.jsonl "Long task"
+```
+
+Behavior:
+- the child is spawned in its own process group (`DETACHED_PROCESS` on Windows, `start_new_session` elsewhere) so it survives this process exiting
+- no assistant text is streamed back; the JSON envelope has `status: "detached"`, an empty `text`, and a `pid`
+- without `--detach-log` the child's stdout and stderr are discarded
+- resume the work later with the printed `session_id`
 
 ## REPL behavior
 
@@ -82,8 +105,22 @@ Metrics may include:
 - `cache_creation_input_tokens`
 - `cost_usd`
 
+## Pass-through flags
+
+Forwarded to the `claude` CLI unchanged:
+- session: `--model`, `--fallback-model`, `--effort`, `--session-name`, `--fork-session`
+- prompt: `--system-prompt`, `--append-system-prompt`, `--json-schema`
+- agents: `--agent`, `--agents`
+- tools: `--tools`, `--allowed-tools`, `--disallowed-tools`, `--add-dir`
+- permissions: `--permission-mode` (validated against the CLI's mode list)
+- MCP and plugins: `--mcp-config`, `--strict-mcp-config`, `--plugin-dir`, `--plugin-url`
+- settings: `--settings`, `--setting-sources`
+- budget: `--max-budget-usd`
+- misc: `--betas`, `--bare`, `--include-hook-events`, `--exclude-dynamic-system-prompt-sections`, `--disable-slash-commands`
+
 ## Known limits
 
 - CLI subprocess transport only
 - relies on Claude's installed CLI behavior for session semantics
 - does not implement interactive stdin stream-json mode
+- `--detach` cannot report turn success; poll the session or read `--detach-log`

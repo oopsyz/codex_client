@@ -142,6 +142,17 @@ only removes this connection's subscription; a fresh one-shot CLI connection
 usually returns `notSubscribed`. Use `--unload-thread` for the complete
 interrupt, clean, unsubscribe, and no-subscriber grace-period workflow.
 
+Archive a thread after the engine has durably recorded its review bundle:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --archive-thread THREAD_ID
+```
+
+This waits for and returns the server's matching `thread/archived` notification.
+`--unarchive-thread THREAD_ID` is reserved for explicit operator recovery.
+`--delete-thread THREAD_ID` permanently removes the server-side thread log and
+is never used as routine cleanup.
+
 `--unload-thread THREAD_ID` is the lifecycle teardown operation. It opens the
 thread without adding a prompt, interrupts every `inProgress` turn returned by
 `thread/read`, waits for each cancellation notification, calls

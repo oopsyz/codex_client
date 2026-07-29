@@ -426,6 +426,31 @@ class ProtocolClient:
     async def unsubscribe_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
         return await self.request("thread/unsubscribe", {"threadId": thread_id}, timeout=timeout)
 
+    async def _wait_for_thread_notification(
+        self, method: str, thread_id: str, timeout: float | None = None
+    ) -> dict[str, Any]:
+        while True:
+            message = await self.recv_json(timeout)
+            if message.get("method") != method:
+                continue
+            if message.get("params", {}).get("threadId") != thread_id:
+                continue
+            return message
+
+    async def archive_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
+        """Archive a durably recorded thread and capture its confirmation notification."""
+        result = await self.request("thread/archive", {"threadId": thread_id}, timeout=timeout)
+        notification = await self._wait_for_thread_notification("thread/archived", thread_id, timeout)
+        return {"thread_id": thread_id, "archive_result": result, "archived_notification": notification}
+
+    async def unarchive_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
+        """Restore an archived thread at the explicit operator's request."""
+        return await self.request("thread/unarchive", {"threadId": thread_id}, timeout=timeout)
+
+    async def delete_thread(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
+        """Permanently delete a server-side thread log; never used by routine cleanup."""
+        return await self.request("thread/delete", {"threadId": thread_id}, timeout=timeout)
+
     async def clean_background_terminals(self, thread_id: str, timeout: float | None = None) -> dict[str, Any]:
         return await self.request("thread/backgroundTerminals/clean", {"threadId": thread_id}, timeout=timeout)
 
@@ -680,10 +705,13 @@ async def wait_for_turn_terminal(
 async def default_notification_handler(ws: Any, message: dict[str, Any], verbosity: int = 0) -> bool:
     method = message.get("method", "")
     params = message.get("params", {})
-    if method == "thread/status/changed" and verbosity >= 1:
+    if method in {"thread/status/changed", "thread/archived"} and verbosity >= 1:
         thread_id = params.get("threadId", "?")
-        status = params.get("status", {})
-        print(f"[thread/status/changed] thread={thread_id} status={json.dumps(status)}", file=sys.stderr)
+        if method == "thread/status/changed":
+            detail = f"status={json.dumps(params.get('status', {}))}"
+        else:
+            detail = f"params={json.dumps(params)}"
+        print(f"[{method}] thread={thread_id} {detail}", file=sys.stderr)
     return False
 
 
@@ -1241,6 +1269,9 @@ async def run_client(args: argparse.Namespace) -> int:
             args.read_turn,
             args.thread_turns,
             args.thread_items,
+            args.archive_thread,
+            args.unarchive_thread,
+            args.delete_thread,
             args.background_terminals,
             args.clean_background_terminals,
             args.terminate_background_terminal,
@@ -1356,6 +1387,18 @@ async def run_client(args: argparse.Namespace) -> int:
                     limit=args.items_limit,
                     turn_id=args.items_turn_id,
                 )
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.archive_thread:
+                result = await client.archive_thread(args.archive_thread, timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.unarchive_thread:
+                result = await client.unarchive_thread(args.unarchive_thread, timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.delete_thread:
+                result = await client.delete_thread(args.delete_thread, timeout)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
             if args.background_terminals:
@@ -1548,6 +1591,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--items-turn-id", default="", metavar="TURN_ID", help="Restrict --thread-items to one turn.")
     parser.add_argument("--items-cursor", default="", metavar="CURSOR", help="Pagination cursor for --thread-items.")
     parser.add_argument("--items-limit", type=int, default=50, metavar="N", help="Page size for --thread-items (default 50).")
+    parser.add_argument(
+        "--archive-thread",
+        default="",
+        metavar="THREAD_ID",
+        help="Call thread/archive after durable review-bundle recording and wait for thread/archived.",
+    )
+    parser.add_argument(
+        "--unarchive-thread",
+        default="",
+        metavar="THREAD_ID",
+        help="Explicit operator recovery only: call thread/unarchive.",
+    )
+    parser.add_argument(
+        "--delete-thread",
+        default="",
+        metavar="THREAD_ID",
+        help="Permanently delete the server-side thread log; never routine cleanup.",
+    )
     parser.add_argument(
         "--background-terminals",
         "--list-background-terminals",
