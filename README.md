@@ -106,6 +106,11 @@ The client uses this protocol flow:
 
 If `--cwd` is omitted, the client leaves `cwd` out of the protocol params and `codex app-server` uses its own default workspace.
 
+When the client runs on Windows against a remote Linux app-server through an
+SSH forward, a POSIX-absolute `--cwd` such as `/home/ec2-user/workspace` is
+sent unchanged. The client must not rewrite that server-side path into a
+local `C:\\home\\...` path.
+
 It handles:
 
 - `item/agentMessage/delta`

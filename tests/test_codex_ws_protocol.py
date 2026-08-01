@@ -40,6 +40,7 @@ from codex_ws_client import (  # noqa: E402
     sandbox_validation_error,
     wait_for_turn_terminal,
     resolve_default_model,
+    normalize_protocol_cwd,
     parse_args,
     parse_headers,
 )
@@ -766,6 +767,16 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             (project_codex / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
             with mock.patch.dict(os.environ, {"CODEX_HOME": str(user_codex)}, clear=False):
                 self.assertEqual(resolve_default_model(subdir), "gpt-5.5")
+
+    def test_normalize_protocol_cwd_preserves_remote_posix_path_on_windows(self) -> None:
+        with mock.patch.object(os, "name", "nt"):
+            self.assertEqual(
+                normalize_protocol_cwd("/home/ec2-user/openarchitect/workspace"),
+                "/home/ec2-user/openarchitect/workspace",
+            )
+
+    def test_normalize_protocol_cwd_resolves_local_path(self) -> None:
+        self.assertEqual(normalize_protocol_cwd("."), str(Path(".").resolve()))
 
     def test_main_returns_sigint_for_forced_loop_stop_only(self) -> None:
         def fake_asyncio_run(coro: object) -> None:

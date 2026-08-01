@@ -173,6 +173,16 @@ def resolve_default_model(workspace_dir: Path | None = None) -> str:
     return config_model or DEFAULT_MODEL
 
 
+def normalize_protocol_cwd(value: str | None) -> str | None:
+    """Preserve a remote POSIX workspace when the client runs on Windows."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if os.name == "nt" and raw.startswith("/"):
+        return raw
+    return str(Path(raw).resolve())
+
+
 def prompt_choice(prompt: str, valid: set[str], default: str) -> str:
     while True:
         try:
@@ -1227,14 +1237,19 @@ def resolve_prompt(args: argparse.Namespace) -> str:
 
 async def run_client(args: argparse.Namespace) -> int:
     global _interactive_approvals_enabled
-    workspace_dir = Path(args.cwd).resolve() if getattr(args, "cwd", "") else Path.cwd().resolve()
+    raw_cwd = str(getattr(args, "cwd", "") or "").strip()
+    workspace_dir = (
+        None
+        if os.name == "nt" and raw_cwd.startswith("/")
+        else (Path(raw_cwd).resolve() if raw_cwd else Path.cwd().resolve())
+    )
     if not getattr(args, "model", ""):
         args.model = resolve_default_model(workspace_dir)
     timeout = args.timeout if args.timeout > 0 else None
     connect_timeout = args.connect_timeout if args.connect_timeout > 0 else None
     resume_timeout = args.resume_timeout if args.resume_timeout > 0 else None
     turn_deadline = args.turn_deadline if args.turn_deadline > 0 else None
-    cwd = str(Path(args.cwd).resolve()) if getattr(args, "cwd", "") else None
+    cwd = normalize_protocol_cwd(raw_cwd)
     _interactive_approvals_enabled = bool(getattr(args, "interactive_approvals", False) and getattr(args, "repl", False))
     try:
         headers = parse_headers(args.header or [], args.header_env or [])
