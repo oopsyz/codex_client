@@ -106,6 +106,12 @@ The client uses this protocol flow:
 
 If `--cwd` is omitted, the client leaves `cwd` out of the protocol params and `codex app-server` uses its own default workspace.
 
+`--runtime-workspace-root <absolute-path>` may be repeated. The client sends
+the ordered roots as `runtimeWorkspaceRoots` on both `thread/start` and
+`turn/start`, independently of `--cwd`. This permits a read-only instruction
+harness to remain the thread CWD while a separate output lease is materialized
+as the writable workspace root by a named permission profile.
+
 When the client runs on Windows against a remote Linux app-server through an
 SSH forward, a POSIX-absolute `--cwd` such as `/home/ec2-user/workspace` is
 sent unchanged. The client must not rewrite that server-side path into a
@@ -128,6 +134,8 @@ Fresh thread:
   `--sandbox {read-only,workspace-write,danger-full-access}` or
   `--permissions PROFILE_ID`
 - `--sandbox` and `--permissions` cannot be combined
+- repeat `--runtime-workspace-root` to bind writable workspace roots without
+  changing the instruction-discovery CWD
 - `danger-full-access` is never selected implicitly
 
 Resumed thread:

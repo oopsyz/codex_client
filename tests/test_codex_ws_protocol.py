@@ -32,6 +32,7 @@ from codex_ws_client import (  # noqa: E402
     extract_turn,
     active_turn_ids,
     is_terminal_turn_status,
+    make_turn_params,
     run_detached_turn,
     run_thread_unload,
     run_turn,
@@ -224,12 +225,14 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             instructions="review",
             ephemeral=False,
             print_thread_id=False,
+            runtime_workspace_root=["C:/review-output"],
         )
 
         thread_id, reused = await ensure_thread(client, args, "C:/review-output", 1, 1)
 
         self.assertEqual((thread_id, reused), ("profile-thread", False))
         self.assertEqual(client.params["permissions"], "oa-review-output")
+        self.assertEqual(client.params["runtimeWorkspaceRoots"], ["C:/review-output"])
         self.assertNotIn("sandbox", client.params)
         self.assertEqual(args.effective_sandbox, "oa-review-output")
 
@@ -681,6 +684,28 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             args = parse_args()
         self.assertEqual(args.permissions, "oa-review-output")
         self.assertIsNone(args.sandbox)
+
+    def test_runtime_workspace_roots_are_explicit_and_repeatable(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--permissions",
+                "oa-review-output",
+                "--runtime-workspace-root",
+                "C:/output-a",
+                "--runtime-workspace-root",
+                "C:/output-b",
+                "prompt",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(args.runtime_workspace_root, ["C:/output-a", "C:/output-b"])
+        turn = make_turn_params(args, "thread-1", "C:/harness", "review")
+        self.assertEqual(
+            turn["runtimeWorkspaceRoots"], ["C:/output-a", "C:/output-b"]
+        )
 
     def test_inspection_commands_are_exempt_from_sandbox_selection(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--list-threads"]):

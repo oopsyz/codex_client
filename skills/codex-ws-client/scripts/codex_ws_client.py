@@ -839,6 +839,9 @@ def make_thread_params(
             params["sandbox"] = sandbox
     if cwd is not None:
         params["cwd"] = cwd
+    workspace_roots = list(getattr(args, "runtime_workspace_root", ()) or ())
+    if workspace_roots:
+        params["runtimeWorkspaceRoots"] = workspace_roots
     return params
 
 
@@ -867,6 +870,9 @@ def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, 
     params: dict[str, Any] = {"threadId": thread_id, "approvalPolicy": "never", "input": [{"type": "text", "text": prompt}]}
     if cwd is not None:
         params["cwd"] = cwd
+    workspace_roots = list(getattr(args, "runtime_workspace_root", ()) or ())
+    if workspace_roots:
+        params["runtimeWorkspaceRoots"] = workspace_roots
     if getattr(args, "output_schema", ""):
         params["outputSchema"] = json.loads(args.output_schema)
     return params
@@ -1567,6 +1573,12 @@ def parse_args() -> argparse.Namespace:
         "--permissions",
         default="",
         help="Named permission-profile id for a new prompt thread; cannot be combined with --sandbox.",
+    )
+    parser.add_argument(
+        "--runtime-workspace-root",
+        action="append",
+        default=[],
+        help="Absolute writable workspace root to bind through runtimeWorkspaceRoots; may be repeated.",
     )
     parser.add_argument("--personality", default="pragmatic")
     parser.add_argument("--instructions", default="")

@@ -112,6 +112,9 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox
 - `--sandbox` and `--permissions` are mutually exclusive and both are rejected
   when resuming because a thread's permission policy cannot change; start a
   fresh thread instead.
+- `--runtime-workspace-root PATH` may be repeated and is sent on both
+  `thread/start` and `turn/start`. Use it when the role/instruction `--cwd` is
+  distinct from the writable output lease selected by the permission profile.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
 - `--detach` returns `status: "detached"` for the client operation; inspect the returned turn later to determine whether the server completed it.
 - `--unload-thread` interrupts reported active turns, cleans background terminals, unsubscribes this client, and waits 30 minutes by default. `unload_status: "thread_closed"` is confirmation; elapsed time alone is not.
