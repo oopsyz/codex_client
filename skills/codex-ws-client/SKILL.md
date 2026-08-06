@@ -109,9 +109,10 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox
 - New prompt threads require exactly one permission selector: either explicit
   `--sandbox read-only`, `--sandbox workspace-write`, or
   `--sandbox danger-full-access`, or a named `--permissions PROFILE_ID`.
-- `--sandbox` and `--permissions` are mutually exclusive and both are rejected
-  when resuming because a thread's permission policy cannot change; start a
-  fresh thread instead.
+- `--sandbox` and `--permissions` are mutually exclusive. A legacy `--sandbox`
+  selector is rejected when resuming. A named `--permissions` profile is
+  allowed on resume and is sent on `turn/start`, which is required when
+  `runtimeWorkspaceRoots` rebind a persisted review thread's writable lease.
 - `--runtime-workspace-root PATH` may be repeated and is sent on both
   `thread/start` and `turn/start`. Use it when the role/instruction `--cwd` is
   distinct from the writable output lease selected by the permission profile.

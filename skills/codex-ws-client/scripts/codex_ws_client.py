@@ -873,6 +873,12 @@ def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, 
     workspace_roots = list(getattr(args, "runtime_workspace_root", ()) or ())
     if workspace_roots:
         params["runtimeWorkspaceRoots"] = workspace_roots
+    permissions = str(getattr(args, "permissions", "") or "").strip()
+    if permissions:
+        # The v2 protocol explicitly supports selecting a named profile on
+        # turn/start. This is required when runtimeWorkspaceRoots are rebound
+        # for a persisted thread; the selector is not sent to thread/resume.
+        params["permissions"] = permissions
     if getattr(args, "output_schema", ""):
         params["outputSchema"] = json.loads(args.output_schema)
     return params
@@ -913,10 +919,10 @@ def sandbox_validation_error(args: argparse.Namespace, inspection_operation: boo
     sandbox = getattr(args, "sandbox", None)
     permissions = str(getattr(args, "permissions", "") or "").strip()
     if args.thread_id:
-        if sandbox or permissions:
+        if sandbox:
             return (
-                "Cannot use --sandbox or --permissions when resuming an existing thread because its permission "
-                "policy cannot change. Start a fresh thread without --thread-id to choose permissions."
+                "Cannot use --sandbox when resuming an existing thread. "
+                "Use --permissions to select a named turn profile, or start a fresh thread to choose a legacy sandbox."
             )
         return None
     if bool(sandbox) == bool(permissions):
