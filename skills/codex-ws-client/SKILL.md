@@ -38,6 +38,12 @@ One-shot:
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only "Summarize this repo"
 ```
 
+Named permission profile:
+
+```bash
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --permissions oa-review-output "Review the assigned artifact"
+```
+
 Multi-turn (chain via `thread_id` in JSON output — preferred over `--print-thread-id`):
 
 ```bash
@@ -100,8 +106,12 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox
 - Transport is WebSocket only.
 - The client does not start `codex app-server`; the server must already be running.
 - `--ephemeral` threads are not resumable across connections.
-- New prompt threads require explicit `--sandbox read-only`, `--sandbox workspace-write`, or `--sandbox danger-full-access`.
-- `--sandbox` is rejected when resuming because a thread's sandbox policy cannot change; start a fresh thread instead.
+- New prompt threads require exactly one permission selector: either explicit
+  `--sandbox read-only`, `--sandbox workspace-write`, or
+  `--sandbox danger-full-access`, or a named `--permissions PROFILE_ID`.
+- `--sandbox` and `--permissions` are mutually exclusive and both are rejected
+  when resuming because a thread's permission policy cannot change; start a
+  fresh thread instead.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
 - `--detach` returns `status: "detached"` for the client operation; inspect the returned turn later to determine whether the server completed it.
 - `--unload-thread` interrupts reported active turns, cleans background terminals, unsubscribes this client, and waits 30 minutes by default. `unload_status: "thread_closed"` is confirmation; elapsed time alone is not.
@@ -124,6 +134,9 @@ With `--json`, expect:
 - optional `error`
 - optional `notifications`
 - optional `metrics`
+
+For compatibility, the JSON field remains named `sandbox`; when
+`--permissions` creates the thread, it contains the selected profile id.
 
 `metrics` may include:
 - `latency_ms`

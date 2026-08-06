@@ -124,14 +124,19 @@ It handles:
 Fresh thread:
 
 - if `--thread-id` is omitted, the client creates a new thread
-- `--sandbox {read-only,workspace-write,danger-full-access}` is required
+- exactly one permission selector is required: either
+  `--sandbox {read-only,workspace-write,danger-full-access}` or
+  `--permissions PROFILE_ID`
+- `--sandbox` and `--permissions` cannot be combined
 - `danger-full-access` is never selected implicitly
 
 Resumed thread:
 
 - if `--thread-id` is provided, the client calls `thread/resume`
 - resumed turns use `--resume-timeout`
-- `--sandbox` cannot be used with `--thread-id`; the existing thread's policy cannot change, so start a fresh thread to choose a sandbox
+- neither `--sandbox` nor `--permissions` can be used with `--thread-id`; the
+  existing thread's policy cannot change, so start a fresh thread to choose a
+  permission policy
 
 Persistence:
 
@@ -174,6 +179,9 @@ Current JSON shape includes:
 - optional `error`
 - optional `notifications`
 - optional `metrics`
+
+For compatibility, the output field remains named `sandbox`. When a thread is
+created with `--permissions`, that field contains the selected profile id.
 
 `metrics` currently includes:
 

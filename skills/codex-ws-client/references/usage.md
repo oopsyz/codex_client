@@ -40,7 +40,9 @@ It handles:
 
 Fresh thread:
 - omit `--thread-id`
-- explicitly choose `--sandbox read-only`, `--sandbox workspace-write`, or `--sandbox danger-full-access`
+- choose exactly one of `--sandbox read-only`, `--sandbox workspace-write`,
+  `--sandbox danger-full-access`, or `--permissions PROFILE_ID`
+- never combine `--sandbox` with `--permissions`
 
 Model selection:
 - `--model` overrides the configured model
@@ -52,7 +54,8 @@ Persisted thread:
 - default creation mode persists threads
 - reuse with `--thread-id`
 - resumed turns use `--resume-timeout`
-- do not pass `--sandbox`; the existing thread's sandbox policy cannot change
+- do not pass `--sandbox` or `--permissions`; the existing thread's permission
+  policy cannot change
 - use `--detach` for fire-and-forget turns that will be inspected later with `--read-thread THREAD_ID --include-turns`
 
 Ephemeral thread:
@@ -89,6 +92,9 @@ Interactive approvals:
 - metrics such as latency and token counts
 
 With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, `unsubscribe_status`, and effective `sandbox`. The detached status only means that the client unsubscribed successfully; it is not the final turn status. Plain detached output includes `SANDBOX=` as well.
+
+The output field keeps its legacy `sandbox` name. For a thread created with
+`--permissions`, it contains the selected profile id.
 
 Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, concatenated agent-message `text`, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
 

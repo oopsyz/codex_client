@@ -204,6 +204,35 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls[0][1]["sandbox"], "read-only")
         self.assertEqual(args.effective_sandbox, "read-only")
 
+    async def test_new_thread_can_select_a_named_permission_profile(self) -> None:
+        class ThreadClient:
+            def __init__(self) -> None:
+                self.params: dict[str, object] = {}
+
+            async def start_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                self.params = params
+                return {"thread": {"id": "profile-thread"}}
+
+        client = ThreadClient()
+        args = SimpleNamespace(
+            thread_id="",
+            cwd=".",
+            sandbox=None,
+            permissions="oa-review-output",
+            model="gpt-5",
+            personality="pragmatic",
+            instructions="review",
+            ephemeral=False,
+            print_thread_id=False,
+        )
+
+        thread_id, reused = await ensure_thread(client, args, "C:/review-output", 1, 1)
+
+        self.assertEqual((thread_id, reused), ("profile-thread", False))
+        self.assertEqual(client.params["permissions"], "oa-review-output")
+        self.assertNotIn("sandbox", client.params)
+        self.assertEqual(args.effective_sandbox, "oa-review-output")
+
     async def test_interleaved_notifications_are_buffered_until_matching_response(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -643,19 +672,50 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             args = parse_args()
         self.assertIsNone(args.sandbox)
 
+    def test_named_permissions_argument_is_explicit(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--permissions", "oa-review-output", "prompt"],
+        ):
+            args = parse_args()
+        self.assertEqual(args.permissions, "oa-review-output")
+        self.assertIsNone(args.sandbox)
+
     def test_inspection_commands_are_exempt_from_sandbox_selection(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--list-threads"]):
             args = parse_args()
         self.assertIsNone(sandbox_validation_error(args, inspection_operation=True))
 
-    async def test_new_prompt_thread_requires_sandbox_before_connecting(self) -> None:
+    async def test_new_prompt_thread_requires_exactly_one_permission_policy_before_connecting(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "prompt"]):
             args = parse_args()
         stderr = io.StringIO()
         with redirect_stderr(stderr), mock.patch("codex_ws_client.websockets.connect") as connect:
             result = await run_client(args)
         self.assertEqual(result, 2)
-        self.assertIn("--sandbox is required", stderr.getvalue())
+        self.assertIn("exactly one of --sandbox or --permissions", stderr.getvalue())
+        connect.assert_not_called()
+
+    async def test_new_prompt_thread_rejects_sandbox_and_permissions_together_before_connecting(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--sandbox",
+                "read-only",
+                "--permissions",
+                "oa-review-output",
+                "prompt",
+            ],
+        ):
+            args = parse_args()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), mock.patch("codex_ws_client.websockets.connect") as connect:
+            result = await run_client(args)
+        self.assertEqual(result, 2)
+        self.assertIn("exactly one of --sandbox or --permissions", stderr.getvalue())
         connect.assert_not_called()
 
     async def test_resumed_prompt_rejects_sandbox_before_connecting(self) -> None:
@@ -663,6 +723,20 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             sys,
             "argv",
             ["codex_ws_client.py", "--thread-id", "thread-1", "--sandbox", "workspace-write", "prompt"],
+        ):
+            args = parse_args()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), mock.patch("codex_ws_client.websockets.connect") as connect:
+            result = await run_client(args)
+        self.assertEqual(result, 2)
+        self.assertIn("Start a fresh thread", stderr.getvalue())
+        connect.assert_not_called()
+
+    async def test_resumed_prompt_rejects_named_permissions_before_connecting(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--thread-id", "thread-1", "--permissions", "oa-review-output", "prompt"],
         ):
             args = parse_args()
         stderr = io.StringIO()

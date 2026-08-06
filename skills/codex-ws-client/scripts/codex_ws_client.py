@@ -827,9 +827,16 @@ def make_thread_params(
         "ephemeral": args.ephemeral,
     }
     if include_sandbox:
-        if not args.sandbox:
-            raise ValueError("--sandbox is required when creating a new prompt thread.")
-        params["sandbox"] = args.sandbox
+        sandbox = getattr(args, "sandbox", None)
+        permissions = str(getattr(args, "permissions", "") or "").strip()
+        if bool(sandbox) == bool(permissions):
+            raise ValueError(
+                "exactly one of --sandbox or --permissions is required when creating a new prompt thread."
+            )
+        if permissions:
+            params["permissions"] = permissions
+        else:
+            params["sandbox"] = sandbox
     if cwd is not None:
         params["cwd"] = cwd
     return params
@@ -894,18 +901,20 @@ def thread_sandbox(thread_response: Mapping[str, Any]) -> str | None:
 
 
 def sandbox_validation_error(args: argparse.Namespace, inspection_operation: bool) -> str | None:
-    """Return a CLI error for sandbox selection, if prompt dispatch is unsafe."""
+    """Return a CLI error for permission-policy selection, if prompt dispatch is unsafe."""
     if inspection_operation:
         return None
+    sandbox = getattr(args, "sandbox", None)
+    permissions = str(getattr(args, "permissions", "") or "").strip()
     if args.thread_id:
-        if args.sandbox:
+        if sandbox or permissions:
             return (
-                "Cannot use --sandbox when resuming an existing thread because its sandbox policy cannot change. "
-                "Start a fresh thread without --thread-id to choose a sandbox."
+                "Cannot use --sandbox or --permissions when resuming an existing thread because its permission "
+                "policy cannot change. Start a fresh thread without --thread-id to choose permissions."
             )
         return None
-    if not args.sandbox:
-        return "--sandbox is required when creating a new prompt thread; choose one of: read-only, workspace-write, danger-full-access."
+    if bool(sandbox) == bool(permissions):
+        return "exactly one of --sandbox or --permissions is required when creating a new prompt thread."
     return None
 
 
@@ -1033,7 +1042,7 @@ async def ensure_thread(
         return args.thread_id, True
     result = await client.start_thread(make_thread_params(args, cwd, args.instructions or "Answer concisely."), timeout)
     thread_id = result["thread"]["id"]
-    args.effective_sandbox = args.sandbox
+    args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
     if args.print_thread_id:
         print(f"THREAD_ID={thread_id}", file=sys.stderr)
     return thread_id, False
@@ -1552,7 +1561,12 @@ def parse_args() -> argparse.Namespace:
         "--sandbox",
         choices=SANDBOX_CHOICES,
         default=None,
-        help="Sandbox policy for a new prompt thread; required for new threads and cannot be changed when resuming.",
+        help="Legacy sandbox policy for a new prompt thread; cannot be combined with --permissions.",
+    )
+    parser.add_argument(
+        "--permissions",
+        default="",
+        help="Named permission-profile id for a new prompt thread; cannot be combined with --sandbox.",
     )
     parser.add_argument("--personality", default="pragmatic")
     parser.add_argument("--instructions", default="")

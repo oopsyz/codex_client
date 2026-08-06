@@ -107,8 +107,8 @@ ws://127.0.0.1:8765
 
 - 如果传入 `--thread-id`，客户端会调用 `thread/resume`
 - 恢复线程后的轮次会使用 `--resume-timeout`
-- 创建新提示线程时必须显式指定 `--sandbox read-only`、`--sandbox workspace-write` 或 `--sandbox danger-full-access`
-- 恢复已有线程时不能传入 `--sandbox`；如需更改沙箱策略，请创建新线程
+- 创建新提示线程时必须且只能选择一种权限策略：显式指定 `--sandbox read-only`、`--sandbox workspace-write`、`--sandbox danger-full-access`，或指定命名配置 `--permissions PROFILE_ID`
+- `--sandbox` 与 `--permissions` 不能同时使用；恢复已有线程时两者都不能传入，如需更改权限策略，请创建新线程
 
 持久化：
 
