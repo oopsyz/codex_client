@@ -6,6 +6,8 @@ License: [MIT](LICENSE)
 
 This repository contains `codex_ws_client.py`, a single-file lightweight client for `codex app-server` over WebSocket.
 
+The canonical upstream protocol reference for maintenance is the [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
+
 The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
 
 The primary use case is running it inside Claude Code so Claude models can collaborate with Codex through a live `codex app-server` connection.
@@ -194,8 +196,19 @@ created with `--permissions`, that field contains the selected profile id.
 `metrics` currently includes:
 
 - `latency_ms`
+- `model` (the model actually used, including a later reroute)
 - `input_tokens`
 - `output_tokens`
+- `cached_tokens`
+- `cache_write_tokens`
+- `idle_duration_seconds` (time since the prior turn/thread activity when known)
+
+Usage is collected from `thread/tokenUsage/updated`; model reroutes are applied
+from `model/rerouted`. Missing server fields remain omitted so older app-server
+versions remain compatible. When continuing a persisted thread, pass
+`--resume-ttl SECONDS` to start a fresh thread after the persisted thread has
+been idle longer than the TTL. The default `0` keeps the existing unconditional
+resume behavior, allowing cache/rotation measurements to be gathered first.
 
 ## Useful Commands
 

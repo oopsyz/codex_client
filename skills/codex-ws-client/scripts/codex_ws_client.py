@@ -4,6 +4,7 @@ import ast
 import atexit
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import inspect
 import json
 import os
@@ -659,6 +660,9 @@ def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, 
         }
         if candidate.get("error") is not None:
             result["error"] = candidate.get("error")
+        metrics = turn_metrics(candidate)
+        if metrics:
+            result["metrics"] = metrics
         result["turn"] = dict(candidate)
         return result
     return None
@@ -853,6 +857,7 @@ def make_json_result(
     error: str | None = None,
     *,
     sandbox: str | None = None,
+    metrics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "thread_id": thread_id,
@@ -863,7 +868,93 @@ def make_json_result(
     }
     if error is not None:
         result["error"] = error
+    if metrics:
+        result["metrics"] = dict(metrics)
     return result
+
+
+def _number(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+        return int(parsed) if parsed.is_integer() else parsed
+    return None
+
+
+def _first(mapping: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _timestamp_seconds(value: Any) -> float | None:
+    numeric = _number(value)
+    if numeric is not None:
+        # Protocol timestamps are commonly milliseconds; accept seconds too.
+        return float(numeric) / 1000 if numeric > 10_000_000_000 else float(numeric)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def idle_duration_seconds(thread: Mapping[str, Any], now: float | None = None) -> float | None:
+    """Return elapsed time since the persisted thread's last update."""
+    updated = _timestamp_seconds(_first(thread, "updatedAt", "updated_at", "lastActivityAt"))
+    if updated is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc).timestamp() if now is None else now) - updated)
+
+
+def turn_metrics(
+    turn: Mapping[str, Any],
+    *,
+    usage_override: Mapping[str, Any] | None = None,
+    latency_ms: int | None = None,
+    idle_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Normalize server turn usage without losing the server's naming choices."""
+    metrics: dict[str, Any] = {}
+    model = _first(turn, "model", "modelName", "model_id", "modelId")
+    if isinstance(model, str) and model:
+        metrics["model"] = model
+    usage_candidates = [usage_override] if usage_override is not None else []
+    usage_candidates += [turn.get(key) for key in ("usage", "tokenUsage", "token_usage", "metrics")]
+    usage = next((candidate for candidate in usage_candidates if isinstance(candidate, Mapping)), {})
+    nested_usage = _first(usage, "lastTokenUsage", "last_token_usage")
+    if isinstance(nested_usage, Mapping):
+        usage = nested_usage
+    input_details = _first(usage, "input_tokens_details", "inputTokensDetails")
+    if isinstance(input_details, Mapping):
+        usage = {**usage, **input_details}
+    aliases = {
+        "input_tokens": ("input_tokens", "inputTokens"),
+        "output_tokens": ("output_tokens", "outputTokens"),
+        "cached_tokens": ("cached_tokens", "cachedTokens", "cachedInputTokens", "cached_input_tokens", "cache_read_input_tokens"),
+        "cache_write_tokens": ("cache_write_tokens", "cacheWriteTokens", "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens"),
+    }
+    for output_name, keys in aliases.items():
+        value = _number(_first(usage, *keys))
+        if value is not None:
+            metrics[output_name] = value
+    if latency_ms is not None:
+        metrics["latency_ms"] = latency_ms
+    if idle_seconds is not None:
+        metrics["idle_duration_seconds"] = round(max(0.0, idle_seconds), 3)
+    return metrics
 
 
 def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, prompt: str) -> dict[str, Any]:
@@ -894,8 +985,9 @@ def make_detach_result(
     unsubscribe_status: str,
     *,
     sandbox: str | None = None,
+    metrics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "thread_id": thread_id,
         "turn_id": turn_id,
         "status": "detached",
@@ -903,6 +995,9 @@ def make_detach_result(
         "unsubscribe_status": unsubscribe_status,
         "sandbox": sandbox,
     }
+    if metrics:
+        result["metrics"] = dict(metrics)
+    return result
 
 
 def thread_sandbox(thread_response: Mapping[str, Any]) -> str | None:
@@ -1045,7 +1140,35 @@ async def ensure_thread(
     *,
     force_new: bool = False,
 ) -> tuple[str, bool]:
+    rotation_reason = "forced_new_thread" if force_new else "resume_ttl_exceeded"
     if args.thread_id and not force_new:
+        resume_ttl = float(getattr(args, "resume_ttl", 0) or 0)
+        if resume_ttl > 0 and hasattr(client, "read_thread"):
+            inspected = await client.read_thread(args.thread_id, resume_timeout, include_turns=False)
+            candidate = inspected.get("thread")
+            if isinstance(candidate, Mapping):
+                idle = idle_duration_seconds(candidate)
+                if idle is not None:
+                    args.resume_idle_duration_seconds = idle
+                    if idle > resume_ttl:
+                        force_new = True
+                else:
+                    force_new = True
+                    rotation_reason = "resume_ttl_unavailable"
+            else:
+                force_new = True
+                rotation_reason = "resume_ttl_unavailable"
+        elif resume_ttl > 0:
+            force_new = True
+            rotation_reason = "resume_ttl_unavailable"
+        if force_new:
+            result = await client.start_thread(make_thread_params(args, cwd, args.instructions or "Answer concisely."), timeout)
+            thread_id = result["thread"]["id"]
+            args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
+            args.rotation = {"decision": "fresh_thread", "reason": rotation_reason}
+            if args.print_thread_id:
+                print(f"THREAD_ID={thread_id}", file=sys.stderr)
+            return thread_id, False
         params = make_thread_params(args, cwd, args.instructions or "Answer concisely.", include_sandbox=False)
         params["threadId"] = args.thread_id
         result = await client.resume_thread(params, resume_timeout)
@@ -1054,6 +1177,12 @@ async def ensure_thread(
         if status_type in {"systemError", "notLoaded"}:
             raise RpcError(-32000, f"thread/resume returned unusable status: {status_type}", method="thread/resume")
         args.effective_sandbox = thread_sandbox(result)
+        args.rotation = {"decision": "resume", "reason": "within_resume_ttl"} if resume_ttl > 0 else {"decision": "resume"}
+        resumed_thread = result.get("thread")
+        if isinstance(resumed_thread, Mapping) and not hasattr(args, "resume_idle_duration_seconds"):
+            idle = idle_duration_seconds(resumed_thread)
+            if idle is not None:
+                args.resume_idle_duration_seconds = idle
         return args.thread_id, True
     result = await client.start_thread(make_thread_params(args, cwd, args.instructions or "Answer concisely."), timeout)
     thread_id = result["thread"]["id"]
@@ -1075,6 +1204,12 @@ async def run_turn(
     deadline = TurnDeadline(deadline_seconds)
     started_at = monotonic()
     turn_id = ""
+    usage: Mapping[str, Any] | None = None
+    actual_model: str | None = None
+    turn_idle_seconds = getattr(args, "resume_idle_duration_seconds", None)
+    previous_completed = getattr(args, "_last_turn_completed_at", None)
+    if isinstance(previous_completed, (int, float)):
+        turn_idle_seconds = max(0.0, started_at - previous_completed)
 
     async def _close_client() -> None:
         close = getattr(client, "close", None)
@@ -1087,6 +1222,11 @@ async def run_turn(
     try:
         turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout, deadline=deadline)
         turn_id = turn["turn"]["id"]
+        started_turn = turn.get("turn", {})
+        if isinstance(started_turn, Mapping):
+            model = _first(started_turn, "model", "modelName", "model_id", "modelId")
+            if isinstance(model, str) and model:
+                actual_model = model
         _cancel.active_turn_id = turn_id
         _cancel.cancel_requested = False
         deltas: list[str] = []
@@ -1104,6 +1244,27 @@ async def run_turn(
             message = await client.recv_json(timeout, deadline)
             method = message.get("method")
             params = message.get("params", {})
+            if method == "thread/tokenUsage/updated" and params.get("threadId") in {None, thread_id}:
+                candidate = _first(params, "lastTokenUsage", "last_token_usage", "tokenUsage", "token_usage", "usage")
+                if isinstance(candidate, Mapping):
+                    usage = candidate
+            elif method == "rawResponse/completed" and params.get("turnId") == turn_id:
+                candidate = params.get("usage")
+                if isinstance(candidate, Mapping):
+                    usage = candidate
+            elif method == "model/rerouted" and params.get("turnId") == turn_id:
+                model = params.get("toModel")
+                if isinstance(model, str) and model:
+                    actual_model = model
+            elif method == "model/safetyBuffering/updated" and params.get("turnId") == turn_id:
+                model = params.get("model")
+                if isinstance(model, str) and model:
+                    actual_model = model
+            elif method == "turn/started" and params.get("turn", {}).get("id") == turn_id:
+                started_event_turn = params.get("turn", {})
+                model = _first(started_event_turn, "model", "modelName", "model_id", "modelId")
+                if isinstance(model, str) and model:
+                    actual_model = model
             if method == "item/agentMessage/delta" and params.get("turnId") == turn_id:
                 delta = params.get("delta", "")
                 deltas.append(delta)
@@ -1114,8 +1275,28 @@ async def run_turn(
                 if item.get("type") == "agentMessage":
                     completed_text = item.get("text", "")
             elif method == "turn/completed" and params.get("turn", {}).get("id") == turn_id:
-                status = params.get("turn", {}).get("status", "completed")
+                completed_turn = params.get("turn", {})
+                status = completed_turn.get("status", "completed")
+                if isinstance(completed_turn, Mapping):
+                    model = _first(completed_turn, "model", "modelName", "model_id", "modelId")
+                    if isinstance(model, str) and model:
+                        actual_model = model
+                    direct_usage = _first(completed_turn, "usage", "tokenUsage", "token_usage")
+                    if isinstance(direct_usage, Mapping):
+                        usage = direct_usage
                 text = "".join(deltas).strip() or completed_text.strip()
+                enriched_turn = dict(completed_turn) if isinstance(completed_turn, Mapping) else {}
+                if actual_model:
+                    enriched_turn["model"] = actual_model
+                metrics = turn_metrics(
+                    enriched_turn,
+                    usage_override=usage,
+                    latency_ms=int(round((monotonic() - started_at) * 1000)),
+                    idle_seconds=turn_idle_seconds,
+                )
+                rotation = getattr(args, "rotation", None)
+                if isinstance(rotation, Mapping):
+                    metrics["thread_decision"] = rotation.get("decision")
                 if status == "failed":
                     result = make_json_result(
                         thread_id,
@@ -1124,12 +1305,17 @@ async def run_turn(
                         "failed",
                         params.get("turn", {}).get("error", "Unknown turn failure"),
                         sandbox=getattr(args, "effective_sandbox", None),
+                        metrics=metrics,
                     )
                     await _close_client()
                     return EXIT_TURN_FAILURE, result if args.json else result
                 if args.summary:
                     elapsed_ms = int(round((monotonic() - started_at) * 1000))
-                    print(f"[summary] latency end2end={elapsed_ms}ms", file=sys.stderr)
+                    summary_parts = [f"latency end2end={elapsed_ms}ms"]
+                    for key in ("model", "input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "idle_duration_seconds"):
+                        if key in metrics:
+                            summary_parts.append(f"{key}={metrics[key]}")
+                    print(f"[summary] {' '.join(summary_parts)}", file=sys.stderr)
                 if args.out:
                     Path(args.out).write_text(text, encoding="utf-8")
                 if args.json:
@@ -1140,12 +1326,14 @@ async def run_turn(
                         text,
                         status,
                         sandbox=getattr(args, "effective_sandbox", None),
+                        metrics=metrics,
                     )
                 if args.no_stream:
                     safe_print(text)
                 elif text:
                     safe_print()
                 _cancel.reset()
+                args._last_turn_completed_at = monotonic()
                 await _close_client()
                 return EXIT_SUCCESS, None
             elif method == "turn/failed":
@@ -1156,6 +1344,12 @@ async def run_turn(
                     "failed",
                     params.get("error", "Unknown turn failure"),
                     sandbox=getattr(args, "effective_sandbox", None),
+                    metrics=turn_metrics(
+                        {"model": actual_model} if actual_model else {},
+                        usage_override=usage,
+                        latency_ms=int(round((monotonic() - started_at) * 1000)),
+                        idle_seconds=turn_idle_seconds,
+                    ),
                 )
                 _cancel.reset()
                 await _close_client()
@@ -1191,6 +1385,10 @@ async def run_detached_turn(
     turn_data = turn["turn"]
     turn_id = turn_data["id"]
     turn_status = turn_data.get("status", "unknown")
+    metrics = turn_metrics(turn_data)
+    rotation = getattr(args, "rotation", None)
+    if isinstance(rotation, Mapping):
+        metrics["thread_decision"] = rotation.get("decision")
     unsubscribe = await client.unsubscribe_thread(thread_id, timeout=timeout)
     unsubscribe_status = str(unsubscribe.get("status", "unknown"))
     await _close_client()
@@ -1200,6 +1398,7 @@ async def run_detached_turn(
         str(turn_status),
         unsubscribe_status,
         sandbox=getattr(args, "effective_sandbox", None),
+        metrics=metrics,
     )
 
 
@@ -1334,6 +1533,9 @@ async def run_client(args: argparse.Namespace) -> int:
         return EXIT_BAD_ARGS
     if args.unload_grace_period < 0:
         print("--unload-grace-period must be zero or greater.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.resume_ttl < 0:
+        print("--resume-ttl must be zero or greater.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.wait_turn_timeout < 0:
         print("--wait-turn-timeout must be zero or greater.", file=sys.stderr)
@@ -1613,6 +1815,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--connect-timeout", type=float, default=10)
     parser.add_argument("--resume-timeout", type=float, default=300)
+    parser.add_argument(
+        "--resume-ttl",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="For --thread-id, start a fresh thread when persisted idle time exceeds this TTL; 0 preserves unconditional resume.",
+    )
     parser.add_argument("--turn-deadline", type=float, default=0, help="Overall turn deadline in seconds. 0 disables it.")
     parser.add_argument("--header", action="append", default=[])
     parser.add_argument(

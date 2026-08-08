@@ -44,6 +44,7 @@ from codex_ws_client import (  # noqa: E402
     normalize_protocol_cwd,
     parse_args,
     parse_headers,
+    turn_metrics,
 )
 
 SCHEMA_MANIFEST = {
@@ -115,6 +116,67 @@ def response_for(sent: dict[str, object], result: dict[str, object]) -> dict[str
 
 
 class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_turn_json_exposes_actual_model_cache_usage_and_idle_duration(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(
+            no_stream=True,
+            json=True,
+            output_schema="",
+            summary=False,
+            out="",
+            effective_sandbox="read-only",
+            resume_idle_duration_seconds=42.5,
+        )
+        calls = 0
+
+        async def recv() -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(response_for(ws.sent[-1], {"turn": {"id": "turn-1", "model": "requested-model"}}))
+            if calls == 2:
+                return json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": "thread-1",
+                            "lastTokenUsage": {
+                                "input_tokens": 100,
+                                "output_tokens": 20,
+                                "input_tokens_details": {"cached_tokens": 70, "cache_write_tokens": 15},
+                            },
+                        },
+                    }
+                )
+            if calls == 3:
+                return json.dumps(
+                    {"jsonrpc": "2.0", "method": "model/rerouted", "params": {"turnId": "turn-1", "toModel": "actual-model"}}
+                )
+            return json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-1", "status": "completed"}},
+                }
+            )
+
+        ws.recv = recv  # type: ignore[method-assign]
+        exit_code, result = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
+        self.assertEqual(exit_code, EXIT_SUCCESS)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["metrics"]["model"], "actual-model")
+        self.assertEqual(result["metrics"]["cached_tokens"], 70)
+        self.assertEqual(result["metrics"]["cache_write_tokens"], 15)
+        self.assertEqual(result["metrics"]["idle_duration_seconds"], 42.5)
+
+    def test_turn_metrics_accepts_responses_usage_shape(self) -> None:
+        metrics = turn_metrics(
+            {"model": "gpt-5.6", "usage": {"input_tokens": 10, "output_tokens": 2, "input_tokens_details": {"cached_tokens": 8, "cache_write_tokens": 1}}}
+        )
+        self.assertEqual(metrics, {"model": "gpt-5.6", "input_tokens": 10, "output_tokens": 2, "cached_tokens": 8, "cache_write_tokens": 1})
+
     async def test_resume_thread_uses_structured_params(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -127,13 +189,14 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             instructions="dev",
             ephemeral=False,
             print_thread_id=False,
+            resume_idle_duration_seconds=12.5,
         )
 
         async def recv() -> str:
             return json.dumps(
                 response_for(
                     ws.sent[-1],
-                    {"thread": {"id": "thread-1", "sandbox": "workspace-write", "status": {"type": "idle"}}},
+                    {"thread": {"id": "thread-1", "sandbox": "workspace-write", "updatedAt": "2020-01-01T00:00:00Z", "status": {"type": "idle"}}},
                 )
             )
 
@@ -144,6 +207,7 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.sent[0]["params"]["cwd"], "C:/repo")
         self.assertNotIn("sandbox", ws.sent[0]["params"])
         self.assertEqual(args.effective_sandbox, "workspace-write")
+        self.assertEqual(args.resume_idle_duration_seconds, 12.5)
 
     async def test_resume_thread_omits_cwd_when_not_provided(self) -> None:
         ws = MockWebSocket([])
@@ -204,6 +268,64 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls[0][2], 1)
         self.assertEqual(client.calls[0][1]["sandbox"], "read-only")
         self.assertEqual(args.effective_sandbox, "read-only")
+
+    async def test_resume_ttl_starts_fresh_thread_when_thread_is_idle_too_long(self) -> None:
+        class ThreadClient:
+            async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, object]:
+                self.read_args = (thread_id, timeout, include_turns)
+                return {"thread": {"id": thread_id, "updatedAt": "2020-01-01T00:00:00Z"}}
+
+            async def start_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                self.start_args = (params, timeout)
+                return {"thread": {"id": "fresh-ttl"}}
+
+            async def resume_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                raise AssertionError("expired thread must not be resumed")
+
+        client = ThreadClient()
+        args = SimpleNamespace(
+            thread_id="old-thread",
+            cwd=".",
+            sandbox="read-only",
+            permissions="",
+            model="gpt-5",
+            personality="pragmatic",
+            instructions="dev",
+            ephemeral=False,
+            print_thread_id=False,
+            resume_ttl=1,
+        )
+        thread_id, reused = await ensure_thread(client, args, "C:/repo", 1, 1)
+        self.assertEqual((thread_id, reused), ("fresh-ttl", False))
+        self.assertEqual(args.rotation, {"decision": "fresh_thread", "reason": "resume_ttl_exceeded"})
+        self.assertGreater(args.resume_idle_duration_seconds, 1)
+
+    async def test_resume_ttl_fails_closed_to_fresh_thread_when_idle_timestamp_missing(self) -> None:
+        class ThreadClient:
+            async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, object]:
+                return {"thread": {"id": thread_id}}
+
+            async def start_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                return {"thread": {"id": "fresh-unknown-age"}}
+
+            async def resume_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                raise AssertionError("TTL-unavailable thread must not be resumed")
+
+        args = SimpleNamespace(
+            thread_id="unknown-age",
+            cwd=".",
+            sandbox="read-only",
+            permissions="",
+            model="gpt-5",
+            personality="pragmatic",
+            instructions="dev",
+            ephemeral=False,
+            print_thread_id=False,
+            resume_ttl=60,
+        )
+        thread_id, reused = await ensure_thread(ThreadClient(), args, "C:/repo", 1, 1)
+        self.assertEqual((thread_id, reused), ("fresh-unknown-age", False))
+        self.assertEqual(args.rotation, {"decision": "fresh_thread", "reason": "resume_ttl_unavailable"})
 
     async def test_new_thread_can_select_a_named_permission_profile(self) -> None:
         class ThreadClient:
@@ -596,6 +718,42 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cwd", ws.sent[0]["params"])
         self.assertTrue(ws.closed)
         self.assertEqual(ws.close_calls, 1)
+
+    async def test_detached_turn_emits_available_metrics_for_harvest(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(output_schema="", effective_sandbox="read-only")
+
+        async def recv() -> str:
+            if ws.sent[-1]["method"] == "turn/start":
+                return json.dumps(
+                    response_for(
+                        ws.sent[-1],
+                        {
+                            "turn": {
+                                "id": "turn-1",
+                                "status": "inProgress",
+                                "model": "gpt-5.6",
+                                "usage": {
+                                    "input_tokens": 100,
+                                    "output_tokens": 5,
+                                    "input_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 10},
+                                },
+                            }
+                        },
+                    )
+                )
+            return json.dumps(response_for(ws.sent[-1], {"status": "unsubscribed"}))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        result = await run_detached_turn(client, args, "thread-1", None, "prompt", 1)
+        self.assertEqual(result["metrics"], {
+            "model": "gpt-5.6",
+            "input_tokens": 100,
+            "output_tokens": 5,
+            "cached_tokens": 80,
+            "cache_write_tokens": 10,
+        })
 
     async def test_cancel_requests_interrupt_on_next_loop_iteration(self) -> None:
         class FakeClient:
@@ -1058,6 +1216,12 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "id": "turn-1",
                             "status": "completed",
+                            "model": "gpt-5.6",
+                            "usage": {
+                                "input_tokens": 12,
+                                "output_tokens": 3,
+                                "input_tokens_details": {"cached_tokens": 8, "cache_write_tokens": 1},
+                            },
                             "items": [
                                 {"type": "reasoning", "id": "reason-1"},
                                 {"type": "agentMessage", "id": "msg-1", "text": "first"},
@@ -1075,6 +1239,9 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["turn_id"], "turn-1")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["text"], "first second")
+        self.assertEqual(result["metrics"]["model"], "gpt-5.6")
+        self.assertEqual(result["metrics"]["cached_tokens"], 8)
+        self.assertEqual(result["metrics"]["cache_write_tokens"], 1)
 
     def test_extract_turn_distinguishes_missing_turn(self) -> None:
         self.assertIsNone(extract_turn({"thread": {"id": "thread-1", "turns": []}}, "turn-missing"))

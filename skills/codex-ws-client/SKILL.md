@@ -7,6 +7,18 @@ description: Use this skill when working with the bundled single-file `scripts/c
 
 Use the bundled single-file script at `scripts/codex_ws_client.py` as the local client for `codex app-server` over WebSocket.
 
+## Upstream protocol reference
+
+Use the official [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server)
+as the primary protocol reference when updating this client. Re-check method
+shapes, notifications, lifecycle behavior, experimental capability gates, and
+event/field names against that documentation before changing the transport or
+JSON output contract.
+
+For cache-retention and model-specific TTL calibration, also consult the
+[OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching);
+do not hard-code one rotation threshold for every model.
+
 ## Core workflow
 
 1. Confirm the server URI and whether `codex app-server` is already running.
@@ -144,8 +156,17 @@ For compatibility, the JSON field remains named `sandbox`; when
 
 `metrics` may include:
 - `latency_ms`
+- `model` (actual model after any reroute)
 - `input_tokens`
 - `output_tokens`
+- `cached_tokens`
+- `cache_write_tokens`
+- `idle_duration_seconds`
+
+The client reads usage from `thread/tokenUsage/updated` and model reroutes from
+`model/rerouted`. Use `--resume-ttl SECONDS` to make persisted-thread resume
+TTL-aware; an idle thread beyond the TTL is replaced with a fresh thread. The
+default `0` preserves unconditional resume while collecting baseline metrics.
 
 ## When to load more detail
 

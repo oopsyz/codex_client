@@ -2,6 +2,11 @@
 
 This skill bundles `scripts/codex_ws_client.py`, a single-file lightweight client for `codex app-server` over WebSocket.
 
+Protocol maintenance reference: [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
+Use it to verify app-server methods, notifications, response fields, lifecycle
+semantics, and experimental API requirements before changing the client.
+For model-specific cache-retention guidance, see the [OpenAI prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching).
+
 ## Use cases
 
 Use it when:
