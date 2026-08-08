@@ -868,6 +868,9 @@ def make_json_result(
 
 def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, prompt: str) -> dict[str, Any]:
     params: dict[str, Any] = {"threadId": thread_id, "approvalPolicy": "never", "input": [{"type": "text", "text": prompt}]}
+    effort = str(getattr(args, "effort", "") or "").strip()
+    if effort:
+        params["effort"] = effort
     if cwd is not None:
         params["cwd"] = cwd
     workspace_roots = list(getattr(args, "runtime_workspace_root", ()) or ())
@@ -1569,6 +1572,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--cwd", default="", help="Explicit working directory to send; omitted lets app-server choose its default.")
     parser.add_argument("--model", default="", help="Model to use. If omitted, read ~/.codex/config.toml and fall back to the client default.")
+    parser.add_argument(
+        "--effort",
+        choices=("none", "minimal", "low", "medium", "high", "xhigh"),
+        default="",
+        help="Reasoning effort for the turn; omitted uses the server/model default.",
+    )
     parser.add_argument(
         "--sandbox",
         choices=SANDBOX_CHOICES,

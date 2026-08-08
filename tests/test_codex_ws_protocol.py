@@ -708,6 +708,26 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(turn["permissions"], "oa-review-output")
 
+    def test_reasoning_effort_is_sent_as_turn_effort(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--permissions", "oa-review-output", "--effort", "high", "prompt"],
+        ):
+            args = parse_args()
+        turn = make_turn_params(args, "thread-1", "C:/harness", "review")
+        self.assertEqual(turn["effort"], "high")
+
+    def test_reasoning_effort_is_omitted_by_default(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--permissions", "oa-review-output", "prompt"],
+        ):
+            args = parse_args()
+        turn = make_turn_params(args, "thread-1", "C:/harness", "review")
+        self.assertNotIn("effort", turn)
+
     def test_inspection_commands_are_exempt_from_sandbox_selection(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--list-threads"]):
             args = parse_args()
