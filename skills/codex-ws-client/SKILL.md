@@ -176,3 +176,13 @@ Read [references/usage.md](references/usage.md) when you need:
 - notification/approval behavior
 - logging and debugging options
 - known limits
+- remote access through `scripts/codex_ws_gateway.py` (authenticated TLS relay in front of a local app-server)
+
+## Gateway safety
+
+`scripts/codex_ws_gateway.py` exposes a local `codex app-server` to the network. Its
+bearer token is equivalent to shell access on the gateway host, and the gateway
+authenticates callers without restricting what they request — a remote client can ask
+for `danger-full-access`. Never start it for a user without saying so, never bind a
+non-loopback host without TLS, and never place the token in argv or a committed file
+(use `--header-env`). Read [references/usage.md](references/usage.md) first.

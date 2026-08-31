@@ -191,3 +191,78 @@ Typical server command:
 ```powershell
 codex app-server --listen ws://127.0.0.1:8765
 ```
+
+## Remote access via the gateway
+
+`codex app-server` binds loopback and has no authentication, so it must never be bound
+to a public interface directly. `scripts/codex_ws_gateway.py` fronts it with TLS and a
+bearer token, then relays JSON-RPC frames verbatim in both directions — every method
+keeps working, including server-initiated approval and elicitation requests.
+
+### Read before exposing a host
+
+The gateway publishes an agent that executes code. Understand these before running it:
+
+- **The token is equivalent to shell access.** Anyone holding it can make the app-server
+  run commands and write files as the user who started it. Treat it like an SSH key:
+  rotate it, never put it in argv, a URL, or a committed file.
+- **The gateway authenticates callers; it does not restrict them.** A remote client can
+  request `danger-full-access` exactly like a local one. Constrain the sandbox and
+  permission policy where the app-server is started — the gateway will not do it for you.
+- **Plaintext exposes everything.** Without TLS, the token plus every prompt, file path,
+  and command is readable by anything on the path. The gateway refuses to bind a
+  non-loopback host without `--certfile` unless you pass `--allow-plaintext`, and the
+  client prints a warning when `--uri` is a remote `ws://` address.
+- **A public port gets scanned within hours.** The token is then the entire perimeter.
+  Prefer loopback plus a tunnel whenever that reaches far enough.
+- **Every prompt runs in the host's filesystem**, not the caller's. `--cwd` and
+  `--runtime-workspace-root` refer to paths on the gateway host.
+
+The gateway prints a security banner at startup listing whichever of these apply to the
+flags you actually passed, and logs a `WARNING` line each time a non-loopback peer
+authenticates, so an unexpected client is visible without `--verbose`.
+
+Start the gateway:
+
+```powershell
+$env:CODEX_GATEWAY_TOKEN = (python scripts/codex_ws_gateway.py --new-token)
+python scripts/codex_ws_gateway.py --certfile fullchain.pem --keyfile privkey.pem
+```
+
+Connect from a remote machine — the token goes through `--header-env` so it never
+enters argv or shell history:
+
+```powershell
+$env:CODEX_GATEWAY_AUTH = "Bearer <token>"
+python scripts/codex_ws_client.py --uri wss://host:8443 `
+  --header-env "Authorization=CODEX_GATEWAY_AUTH" "your prompt"
+```
+
+For a self-signed certificate, point the client at it with `SSL_CERT_FILE=<cert.pem>`;
+Python's default SSL context honors that variable.
+
+Defaults and guardrails:
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--listen-host` / `--listen-port` | `0.0.0.0` / `8443` | |
+| `--upstream` | `ws://127.0.0.1:8765` | the local app-server |
+| `--path` | `/` | other paths get 404 before auth runs |
+| `--token-env` | `CODEX_GATEWAY_TOKEN` | 32 chars minimum; refuses to start if unset |
+| `--certfile` / `--keyfile` | none | required to bind a non-loopback host |
+| `--allow-plaintext` | off | override TLS only when a tunnel already encrypts the hop |
+| `--allow-origin` | none | any request carrying `Origin` is rejected by default |
+| `--max-connections` | 16 | excess clients get 503 |
+| `--idle-timeout` | 900s | 0 disables |
+| `--max-size` | 8 MB | frame ceiling |
+
+Rejections happen during `process_request`, before the handshake completes and before
+any byte reaches the app-server. Five failed auth attempts lock a peer out for five
+minutes (429). `GET /healthz` returns 200 without a token, for reverse-proxy probes.
+
+Exit codes: `0` clean shutdown, `2` bad configuration (missing token, TLS refusal,
+missing cert), `3` cannot bind, `130` SIGINT.
+
+Two lower-exposure alternatives worth preferring when they fit: bind the gateway to
+`127.0.0.1` and reach it over an SSH tunnel or WireGuard/Tailscale, or terminate TLS at
+a reverse proxy and keep the gateway on loopback behind it.

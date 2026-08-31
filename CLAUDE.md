@@ -49,7 +49,9 @@ Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-cl
 
 ## Architecture
 
-**Single-file implementation:** All logic lives in `skills/codex-ws-client/scripts/codex_ws_client.py` (about 650 lines). There are no local module imports.
+**Single-file implementation:** All client logic lives in `skills/codex-ws-client/scripts/codex_ws_client.py`. There are no local module imports.
+
+**Remote access gateway:** `skills/codex-ws-client/scripts/codex_ws_gateway.py` is a separate, independent single file. `codex app-server` binds loopback with no authentication; the gateway fronts it with TLS plus a bearer token and relays JSON-RPC frames verbatim in both directions, so no protocol logic is duplicated. It imports nothing from `codex_ws_client.py`. Auth, origin, path, and connection-limit checks all run in `process_request` — before the WebSocket handshake completes and before any byte reaches the app-server.
 
 **Protocol flow:**
 
@@ -79,6 +81,7 @@ If `--cwd` is omitted, the client does not send `cwd` and the server uses its ow
 ## Key Files
 
 - [skills/codex-ws-client/scripts/codex_ws_client.py](skills/codex-ws-client/scripts/codex_ws_client.py) — full implementation
+- [skills/codex-ws-client/scripts/codex_ws_gateway.py](skills/codex-ws-client/scripts/codex_ws_gateway.py) — authenticated TLS relay for remote access
 - [skills/codex-ws-client/SKILL.md](skills/codex-ws-client/SKILL.md) — skill descriptor used by Claude Code
 - [skills/codex-ws-client/references/usage.md](skills/codex-ws-client/references/usage.md) — detailed usage reference
 - [README.md](README.md) — English documentation

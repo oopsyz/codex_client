@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Any, Awaitable, Callable, Mapping
+from urllib.parse import urlparse
 
 import websockets
 
@@ -757,6 +758,24 @@ async def default_server_request_handler(ws: Any, message: dict[str, Any], _verb
         return True
     await ws.send(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}))
     return True
+
+
+def insecure_remote_uri_warning(uri: str, headers: Mapping[str, str]) -> str | None:
+    """Warn when credentials would cross a network in cleartext.
+
+    Only ``ws://`` to a non-loopback host qualifies: local connections stay on the
+    machine, and ``wss://`` is encrypted.  Returns ``None`` when there is nothing to say.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme != "ws":
+        return None
+    host = (parsed.hostname or "").lower()
+    if host in ("127.0.0.1", "::1", "localhost", ""):
+        return None
+    detail = "Any headers you send, including bearer tokens, and the full prompt text are readable on the path."
+    if any(key.lower() == "authorization" for key in headers):
+        detail = "The Authorization header you are sending is exposed in cleartext to anything on the path."
+    return f"WARNING: {uri} is an unencrypted connection to a remote host. {detail} Use wss:// or tunnel the connection."
 
 
 def parse_headers(
@@ -1550,6 +1569,10 @@ async def run_client(args: argparse.Namespace) -> int:
     connect_kwargs: dict[str, Any] = {"max_size": 8_000_000}
     if headers:
         connect_kwargs["additional_headers"] = headers
+    insecure_warning = insecure_remote_uri_warning(args.uri, headers)
+    if insecure_warning:
+        # stderr only, so --json stdout stays machine-parseable.
+        print(insecure_warning, file=sys.stderr)
     if args.ndjson_file:
         open_ndjson(args.ndjson_file)
     loop = asyncio.get_running_loop()
