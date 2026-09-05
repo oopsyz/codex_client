@@ -176,6 +176,48 @@ A returned `unload_status: "thread_closed"` confirms that the server unloaded
 the thread. `grace_period_elapsed` means only that the client waited: another
 subscriber or new thread activity can prevent the server from unloading it.
 
+## Bounded reusable adapter
+
+Non-conversational consumers should use the explicit bounded profile instead of
+the CLI workflow or the conversational `ProtocolClient`:
+
+```python
+from codex_ws_client import (
+    BoundedClientProfile,
+    NotificationObservation,
+    open_bounded_client,
+)
+
+
+def admit(notification):
+    if notification.method not in {"configWarning", "remoteControl/status/changed"}:
+        raise ValueError("notification not admitted")
+    return NotificationObservation(notification.method, "admitted")
+
+
+profile = BoundedClientProfile(
+    "wss://operator-supplied-endpoint",
+    request_timeout=30,
+    max_frame_bytes=1_048_576,
+    max_total_bytes=8_000_000,
+    max_notifications=8,
+    notification_validator=admit,
+)
+
+async with open_bounded_client(profile) as client:
+    response = await client.request("initialize", {}, request_id=1)
+```
+
+This API owns one explicit WebSocket connection and returns only the correlated
+response plus sanitized `NotificationObservation` values. It validates the
+current flattened `ServerNotificationEnvelope` (`method`, `params`, optional
+`emittedAtMs`), uses one shared request deadline, enforces frame/aggregate byte
+and notification-count limits, never retries or buffers unrelated messages,
+does not answer server requests, and does not write raw tracing output. The
+validator is the only admission hook; callers retain responsibility for their
+own allowed-method and parameter policy. It does not select models, permission
+profiles, workspaces, or OA governance state.
+
 ## Known limits
 
 - WebSocket only

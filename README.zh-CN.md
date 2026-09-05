@@ -313,7 +313,7 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --json --thread-id THRE
 ## 已知限制
 
 - 仅支持 WebSocket，不支持 stdio 模式
-- 采用单进程 CLI 设计，不是可复用库
+- 对话式 CLI 仍采用单进程设计；非对话式调用请使用文档中的有界适配器配置
 - 不是完整的协议框架
 - 在 Windows 上，对进行中轮次的优雅中断支持仍有限
 - 对更复杂的服务端请求族只做了部分处理，并不完整

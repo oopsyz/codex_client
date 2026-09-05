@@ -10,6 +10,13 @@ The canonical upstream protocol reference for maintenance is the [Codex App Serv
 
 The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
 
+The same module exposes `BoundedClientProfile`, `BoundedAppServerClient`, and
+`open_bounded_client` for one-shot non-conversational consumers. That profile
+requires an explicit endpoint and request id, enforces finite deadlines and
+byte/notification limits, fails closed on unsupported messages, and returns
+only correlated responses plus caller-approved sanitized notification
+classifications. See [the bounded adapter reference](skills/codex-ws-client/references/usage.md#bounded-reusable-adapter).
+
 The primary use case is running it inside Claude Code so Claude models can collaborate with Codex through a live `codex app-server` connection.
 
 ## Demo
@@ -439,7 +446,8 @@ Do not add `--sandbox` to the resumed-thread command. If the sandbox must change
 ## Known Limits
 
 - WebSocket only, no stdio mode
-- single-process CLI design, not a reusable library
+- the conversational CLI remains a single-process workflow; bounded reuse is
+  available through the explicit adapter profile above
 - not a full protocol framework
 - Windows graceful interrupt of an in-flight turn is still limited
 - richer server-request families are partially handled, not comprehensively implemented
