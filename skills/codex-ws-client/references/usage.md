@@ -197,6 +197,7 @@ def admit(notification):
 
 profile = BoundedClientProfile(
     "wss://operator-supplied-endpoint",
+    attempt_timeout=60,
     request_timeout=30,
     max_frame_bytes=1_048_576,
     max_total_bytes=8_000_000,
@@ -214,9 +215,13 @@ current flattened `ServerNotificationEnvelope` (`method`, `params`, optional
 `emittedAtMs`), uses one shared request deadline, enforces frame/aggregate byte
 and notification-count limits, never retries or buffers unrelated messages,
 does not answer server requests, and does not write raw tracing output. The
+`attempt_timeout` starts at connection and covers initialization, requests, and
+cleanup. A request `deadline` is an absolute `time.monotonic()` deadline and
+cannot renew the attempt budget. `initialize()` completes the source-valid
+`initialize` plus id-less `{ "method": "initialized" }` handshake. The
 validator is the only admission hook; callers retain responsibility for their
 own allowed-method and parameter policy. It does not select models, permission
-profiles, workspaces, or OA governance state.
+profiles, workspaces, or OA governance state, and ambient proxies are disabled.
 
 ## Known limits
 
