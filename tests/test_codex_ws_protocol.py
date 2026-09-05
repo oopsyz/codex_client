@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from time import monotonic
 
 from jsonschema import validate
 from types import SimpleNamespace
@@ -21,13 +22,20 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from codex_ws_client import (  # noqa: E402
     APP_SERVER_OVERLOADED,
+    BoundedAppServerClient,
+    BoundedClientProfile,
+    BoundedProtocolError,
+    BoundedRequestResult,
+    default_server_request_handler,
     EXIT_SUCCESS,
     EXIT_SIGINT,
     _cancel,
     ProtocolClient,
+    NotificationObservation,
     RetryConfig,
     RpcError,
     TurnDeadline,
+    ServerNotificationEnvelope,
     ensure_thread,
     extract_turn,
     active_turn_ids,
@@ -42,6 +50,8 @@ from codex_ws_client import (  # noqa: E402
     wait_for_turn_terminal,
     resolve_default_model,
     normalize_protocol_cwd,
+    open_bounded_client,
+    parse_server_notification_envelope,
     parse_args,
     parse_headers,
     turn_metrics,
@@ -49,20 +59,20 @@ from codex_ws_client import (  # noqa: E402
 
 SCHEMA_MANIFEST = {
   "ClientNotification.json": "4446a1ae8626aa55d812836bfc2dae24213500d87c4759af2698f6199ea5b59f",
-  "ClientRequest.json": "6a13d5ad2c85e61e12a7b97c8b447b37734601f63c55aa8ed70928ab30a71eb3",
+  "ClientRequest.json": "c97c23877dd18a9fbc43a3bb87c72676acfbebdc14a2244342ee05dd95cfa38c",
   "JSONRPCError.json": "8835db6c4ada12ec628613fe2f571edc2c8fb55fc31bac706085e25ad1a08c0e",
-  "ServerNotification.json": "023badaf3f0802767dd5e6029ac24bbbc90019f4853a77af5cb6e5a0cd911bcb",
-  "ServerRequest.json": "5b31783aed46cdcdced357328fb6778d9a88c04f67e097eff79b4026343699f1",
+  "ServerNotification.json": "4035ecb68922741c577bb6570208c144916d919a023316f7194c5d5d30d92039",
+  "ServerRequest.json": "32f5e9fe877ff8d30a0255f7e68d63d6fcb616777a9fd0b0cf43f7b866c0627f",
   "v2/ThreadListParams.json": "693ac88dd3c3c163b422aae3a57aef5c06c65240cc2c2011813d71db9bfc4867",
-  "v2/ThreadListResponse.json": "4db9a8ff72a36d6516c85cd62576b6925528d24b214fa6beef568e58b05769e9",
-  "v2/ThreadReadParams.json": "ab07c67662e3a8db06a9a2905af350919c7f9a7d1d1c4055a33c26234b6c9f23",
-  "v2/ThreadReadResponse.json": "721ef67972be98db6b45828aba6a7f006878909f0bdcd1af01dcc94643905e1e",
-  "v2/ThreadResumeParams.json": "a238b91bfe282f51350202fd2f5e59d2219108dbf432a264f52decf7dbd7b42f",
-  "v2/ThreadResumeResponse.json": "eebe7ad3292190e3150b266d36a938cbb2fe27a2f7d29b14ccd842f3e5197e2f",
+  "v2/ThreadListResponse.json": "ca58e6edaded6165887236d1ef4ce35174e3315417327e5c52d6b27818f4edf2",
+  "v2/ThreadReadParams.json": "034ae7f41fe195edb1010ab8927ac4215caacabbf24f15da96170f604aacb901",
+  "v2/ThreadReadResponse.json": "8d079fb42a4faa554c39831e0a08a38cfecead5e0767a248f98c3b3640b6bae2",
+  "v2/ThreadResumeParams.json": "537f95411388c2a674f9b74751e6ac268fd83253a9a654a41240cf1826584cdc",
+  "v2/ThreadResumeResponse.json": "673ba797791fb67a4a5c6c69b4a98db1086ecc3c94f630c10c7a3839fa739ce7",
   "v2/ThreadStartParams.json": "278d25b0c1771eafc2e0bdaac84c5bbc2cfbd30cc4b1feb15511a74385b0ec95",
-  "v2/ThreadStartResponse.json": "60e16a7cdf72e2055782df0b07bc3a4715e502f0e2233d1eafe8fd534c329fed",
-  "v2/TurnStartParams.json": "bf86fcd73b3282f99db13a402d2c661297849df8c93b7fbc54b234e3f7b1df94",
-  "v2/TurnStartResponse.json": "c221fa3037fb3f1ec0250789b4042210bce37eaf7a17a92113e5b40917eb8840",
+  "v2/ThreadStartResponse.json": "46011408b2ed3cf1f187425238adc037531f8b1de5bd09695428c39b546b9be7",
+  "v2/TurnStartParams.json": "8a29a6fb75c063013567a01133fc4db4052771d22d3c88b634506f2a763df835",
+  "v2/TurnStartResponse.json": "964fac59b8e94f4139d9091b6495da2e82a6cc1939f91c5669c8320fd53234d3",
   "v2/TurnSteerParams.json": "18daa1fcfb60873beb1e1b132e142acf9812b21d69c8ef7ea7803bb748f10df7",
   "v2/TurnSteerResponse.json": "c0cee0b0c57af980fe2727679fbf2d3110ba28e8c9328f40d402fcc44ecb87bf",
 }
@@ -110,12 +120,323 @@ class MockWebSocket:
         self.closed = True
         self.close_calls += 1
 
+    def fail_connection(self) -> None:
+        self.closed = True
+
 
 def response_for(sent: dict[str, object], result: dict[str, object]) -> dict[str, object]:
     return {"jsonrpc": "2.0", "id": sent["id"], "result": result}
 
 
+class BoundedAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def _profile(self, validator=None, **kwargs):
+        return BoundedClientProfile(
+            "ws://127.0.0.1:8765",
+            notification_validator=validator,
+            **kwargs,
+        )
+
+    async def test_current_flattened_notification_is_admitted_without_retaining_raw_params(self) -> None:
+        ws = MockWebSocket(
+            [
+                {"method": "remoteControl/status/changed", "params": {"status": "connected"}, "emittedAtMs": 1234},
+                {"id": 17, "result": {"ok": True}},
+            ]
+        )
+        seen: list[ServerNotificationEnvelope] = []
+
+        def validate_notification(envelope):
+            seen.append(envelope)
+            return NotificationObservation(envelope.method, "admitted")
+
+        client = BoundedAppServerClient(self._profile(validate_notification), ws)
+        async with client:
+            result = await client.request("initialize", {}, request_id=17)
+
+        self.assertIsInstance(result, BoundedRequestResult)
+        self.assertEqual(result.result, {"ok": True})
+        self.assertEqual(result.notifications, (NotificationObservation("remoteControl/status/changed", "admitted"),))
+        self.assertEqual(seen[0].emitted_at_ms, 1234)
+        self.assertEqual(seen[0].method, "remoteControl/status/changed")
+        self.assertEqual(ws.sent[0]["id"], 17)
+        self.assertNotIn("jsonrpc", ws.sent[0])
+        self.assertTrue(ws.closed)
+
+    async def test_mismatched_response_id_fails_closed_without_queueing(self) -> None:
+        ws = MockWebSocket([{"jsonrpc": "2.0", "id": 18, "result": {}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "response id"):
+            await client.request("initialize", {}, request_id=17)
+        self.assertTrue(ws.closed)
+
+    async def test_response_id_type_is_part_of_strict_correlation(self) -> None:
+        ws = MockWebSocket([{"jsonrpc": "2.0", "id": 17.0, "result": {}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "response id"):
+            await client.request("initialize", {}, request_id=17)
+
+    async def test_response_request_hybrid_is_rejected_in_strict_mode(self) -> None:
+        ws = MockWebSocket([{"id": 17, "method": "item/tool/requestUserInput", "result": {"ok": True}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "hybrid"):
+            await client.request("initialize", {}, request_id=17)
+
+    async def test_server_request_is_not_auto_answered(self) -> None:
+        ws = MockWebSocket([{"id": 19, "method": "item/tool/requestUserInput", "params": {}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "server-request"):
+            await client.request("initialize", {}, request_id=17)
+        self.assertEqual(len(ws.sent), 1)
+        self.assertTrue(ws.closed)
+
+    async def test_unknown_notification_is_rejected_before_validator(self) -> None:
+        ws = MockWebSocket([{"method": "future/notification", "params": {}}])
+        called = False
+
+        def validate_notification(_envelope):
+            nonlocal called
+            called = True
+            return NotificationObservation("future/notification", "admitted")
+
+        client = BoundedAppServerClient(self._profile(validate_notification), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "unknown"):
+            await client.request("initialize", {}, request_id=17)
+        self.assertFalse(called)
+
+    async def test_overload_error_is_not_retried(self) -> None:
+        ws = MockWebSocket([{"id": 17, "error": {"code": APP_SERVER_OVERLOADED}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "error response"):
+            await client.request("initialize", {}, request_id=17)
+        self.assertEqual(len(ws.sent), 1)
+
+    async def test_initialize_sends_source_valid_initialized_and_reuses_attempt_budget(self) -> None:
+        ws = MockWebSocket(
+            [
+                {"id": 0, "result": {"ready": True}},
+                {"method": "configWarning", "params": {}, "emittedAtMs": 1234},
+                {"id": 1, "result": {"profiles": []}},
+            ]
+        )
+        validator = lambda envelope: NotificationObservation(envelope.method, "admitted")
+        client = BoundedAppServerClient(
+            self._profile(validator, attempt_timeout=1, request_timeout=1),
+            ws,
+        )
+        deadline = monotonic() + 1
+        initialized = await client.initialize(request_id=0, deadline=deadline)
+        listed = await client.request("permissionProfile/list", {}, request_id=1, deadline=deadline)
+        self.assertEqual(initialized.result, {"ready": True})
+        self.assertEqual(listed.result, {"profiles": []})
+        self.assertEqual(ws.sent[0]["method"], "initialize")
+        self.assertEqual(ws.sent[1], {"method": "initialized"})
+        self.assertEqual(ws.sent[2]["method"], "permissionProfile/list")
+        self.assertEqual(listed.notifications, (NotificationObservation("configWarning", "admitted"),))
+
+    async def test_notification_limit_applies_across_requests_on_one_connection(self) -> None:
+        ws = MockWebSocket(
+            [
+                {"method": "configWarning", "params": {}},
+                {"id": 1, "result": {}},
+                {"method": "configWarning", "params": {}},
+                {"id": 2, "result": {}},
+            ]
+        )
+        validator = lambda envelope: NotificationObservation(envelope.method, "admitted")
+        client = BoundedAppServerClient(self._profile(validator, max_notifications=1), ws)
+        await client.request("one", {}, request_id=1)
+        with self.assertRaisesRegex(BoundedProtocolError, "notification limit"):
+            await client.request("two", {}, request_id=2)
+
+    async def test_attempt_deadline_is_not_renewed_between_requests(self) -> None:
+        ws = MockWebSocket([])
+        client = BoundedAppServerClient(self._profile(attempt_timeout=0.1, request_timeout=1), ws)
+
+        async def recv() -> str:
+            return json.dumps({"id": ws.sent[-1]["id"], "result": {"ok": True}})
+
+        ws.recv = recv  # type: ignore[method-assign]
+        await client.request("one", {}, request_id=1)
+        await asyncio.sleep(0.15)
+        with self.assertRaisesRegex(BoundedProtocolError, "deadline"):
+            await client.request("two", {}, request_id=2)
+
+    async def test_explicit_deadline_cannot_extend_configured_request_cap(self) -> None:
+        ws = MockWebSocket([])
+        blocked = asyncio.Event()
+
+        async def recv() -> str:
+            await blocked.wait()
+            return "{}"
+
+        ws.recv = recv  # type: ignore[method-assign]
+        client = BoundedAppServerClient(self._profile(request_timeout=0.01), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "deadline"):
+            await client.request("capped", {}, request_id=1, deadline=monotonic() + 1)
+
+    async def test_cancellation_aborts_transport_and_terminally_closes_client(self) -> None:
+        class Transport:
+            def __init__(self) -> None:
+                self.aborted = False
+
+            def abort(self) -> None:
+                self.aborted = True
+
+        ws = MockWebSocket([])
+        transport = Transport()
+        ws.transport = transport
+
+        async def recv() -> str:
+            await asyncio.sleep(10)
+            return "{}"
+
+        ws.recv = recv  # type: ignore[method-assign]
+        client = BoundedAppServerClient(self._profile(request_timeout=1), ws)
+        task = asyncio.create_task(client.request("cancel", {}, request_id=1))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(transport.aborted)
+        self.assertTrue(client._closed)
+
+    async def test_terminal_cleanup_prevents_reuse(self) -> None:
+        ws = MockWebSocket([])
+        client = BoundedAppServerClient(self._profile(), ws)
+        await client.close()
+        with self.assertRaisesRegex(BoundedProtocolError, "client is closed"):
+            await client.request("after-close", {}, request_id=1)
+
+    async def test_close_cancellation_aborts_transport_and_remains_idempotent(self) -> None:
+        class Transport:
+            def __init__(self) -> None:
+                self.aborted = False
+
+            def abort(self) -> None:
+                self.aborted = True
+
+        ws = MockWebSocket([])
+        ws.transport = Transport()
+        close_started = asyncio.Event()
+        close_blocked = asyncio.Event()
+
+        async def close() -> None:
+            close_started.set()
+            await close_blocked.wait()
+
+        ws.close = close  # type: ignore[method-assign]
+        client = BoundedAppServerClient(self._profile(), ws)
+        task = asyncio.create_task(client.close())
+        await close_started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(ws.transport.aborted)
+        await client.close()
+        self.assertTrue(ws.transport.aborted)
+
+    async def test_duplicate_response_id_is_rejected(self) -> None:
+        ws = MockWebSocket(
+            [
+                {"jsonrpc": "2.0", "id": 17, "result": {"first": True}},
+                {"jsonrpc": "2.0", "id": 17, "result": {"second": True}},
+            ]
+        )
+        client = BoundedAppServerClient(self._profile(), ws)
+        first = await client.request("initialize", {}, request_id=17)
+        self.assertEqual(first.result, {"first": True})
+        with self.assertRaisesRegex(BoundedProtocolError, "duplicate"):
+            await client.request("initialize", {}, request_id=17)
+
+    async def test_notification_count_limit_is_enforced(self) -> None:
+        ws = MockWebSocket(
+            [
+                {"method": "configWarning", "params": {}},
+                {"method": "configWarning", "params": {}},
+                {"jsonrpc": "2.0", "id": 17, "result": {}},
+            ]
+        )
+        validator = lambda envelope: NotificationObservation(envelope.method, "admitted")
+        client = BoundedAppServerClient(self._profile(validator, max_notifications=1), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "notification limit"):
+            await client.request("initialize", {}, request_id=17)
+
+    async def test_request_deadline_is_shared_across_receive_and_cleanup(self) -> None:
+        ws = MockWebSocket([])
+
+        async def recv() -> str:
+            await asyncio.sleep(0.05)
+            return "{}"
+
+        ws.recv = recv  # type: ignore[method-assign]
+        client = BoundedAppServerClient(self._profile(request_timeout=1), ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "deadline"):
+            await client.request("initialize", {}, request_id=17, deadline=monotonic() + 0.01)
+        self.assertTrue(ws.closed)
+
+    async def test_bounded_adapter_does_not_write_raw_ndjson(self) -> None:
+        ws = MockWebSocket([{"jsonrpc": "2.0", "id": 17, "result": {"ok": True}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        with mock.patch("codex_ws_client.write_ndjson") as write_ndjson:
+            await client.request("initialize", {"prompt": "do not log me"}, request_id=17)
+        write_ndjson.assert_not_called()
+
+    async def test_frame_and_aggregate_limits_are_enforced(self) -> None:
+        frame_ws = MockWebSocket([{"jsonrpc": "2.0", "id": 17, "result": {"large": "x" * 200}}])
+        frame_client = BoundedAppServerClient(self._profile(max_frame_bytes=128, max_total_bytes=512), frame_ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "frame limit"):
+            await frame_client.request("initialize", {}, request_id=17)
+
+        total_ws = MockWebSocket([{"jsonrpc": "2.0", "id": 17, "result": {"ok": True}}])
+        total_client = BoundedAppServerClient(self._profile(max_frame_bytes=80, max_total_bytes=80), total_ws)
+        with self.assertRaisesRegex(BoundedProtocolError, "aggregate byte"):
+            await total_client.request("initialize", {}, request_id=17)
+
+    def test_source_notification_envelope_rejects_jsonrpc_and_bad_timestamp(self) -> None:
+        with self.assertRaises(BoundedProtocolError):
+            parse_server_notification_envelope({"jsonrpc": "2.0", "method": "configWarning", "params": {}})
+        with self.assertRaises(BoundedProtocolError):
+            parse_server_notification_envelope({"method": "configWarning", "params": {}, "emittedAtMs": True})
+
+    def test_bounded_profile_rejects_uri_credentials(self) -> None:
+        with self.assertRaisesRegex(ValueError, "credentials"):
+            BoundedClientProfile("wss://user:secret@operator.example/app-server")
+
+    async def test_connect_uses_operator_endpoint_and_closes_deterministically(self) -> None:
+        ws = MockWebSocket([])
+        with mock.patch("codex_ws_client.websockets.connect", new=mock.AsyncMock(return_value=ws)) as connect:
+            async with open_bounded_client(
+                BoundedClientProfile("wss://operator.example/app-server", headers={"Authorization": "Bearer secret"})
+            ) as client:
+                self.assertIs(client.ws, ws)
+        connect.assert_awaited_once()
+        self.assertEqual(connect.await_args.args[0], "wss://operator.example/app-server")
+        self.assertIsNone(connect.await_args.kwargs["proxy"])
+        self.assertEqual(connect.await_args.kwargs["additional_headers"], {"Authorization": "Bearer secret"})
+        self.assertTrue(ws.closed)
+
+
 class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_user_input_server_request_gets_schema_valid_empty_answers(self) -> None:
+        ws = MockWebSocket([])
+        handled = await default_server_request_handler(
+            ws,
+            {"id": 9, "method": "item/tool/requestUserInput", "params": {}},
+        )
+        self.assertTrue(handled)
+        self.assertEqual(ws.sent[0]["id"], 9)
+        self.assertEqual(ws.sent[0]["result"], {"answers": {}})
+
+    async def test_cli_protocol_core_accepts_source_shaped_response_without_jsonrpc(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            return json.dumps({"id": ws.sent[-1]["id"], "result": {"ok": True}})
+
+        ws.recv = recv  # type: ignore[method-assign]
+        self.assertEqual(await client.request("permissionProfile/list", {}, timeout=1), {"ok": True})
+
     async def test_turn_json_exposes_actual_model_cache_usage_and_idle_duration(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -177,6 +498,32 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(metrics, {"model": "gpt-5.6", "input_tokens": 10, "output_tokens": 2, "cached_tokens": 8, "cache_write_tokens": 1})
 
+    def test_turn_metrics_accepts_current_nested_token_usage_shape(self) -> None:
+        metrics = turn_metrics(
+            {
+                "tokenUsage": {
+                    "total": {"inputTokens": 99, "outputTokens": 20},
+                    "last": {
+                        "inputTokens": 10,
+                        "cachedInputTokens": 8,
+                        "cacheWriteInputTokens": 1,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                    },
+                    "modelContextWindow": 128000,
+                }
+            }
+        )
+        self.assertEqual(
+            metrics,
+            {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cached_tokens": 8,
+                "cache_write_tokens": 1,
+            },
+        )
+
     async def test_resume_thread_uses_structured_params(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -206,6 +553,7 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.sent[0]["method"], "thread/resume")
         self.assertEqual(ws.sent[0]["params"]["cwd"], "C:/repo")
         self.assertNotIn("sandbox", ws.sent[0]["params"])
+        self.assertTrue(ws.sent[0]["params"]["excludeTurns"])
         self.assertEqual(args.effective_sandbox, "workspace-write")
         self.assertEqual(args.resume_idle_duration_seconds, 12.5)
 
@@ -1026,7 +1374,7 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
     def test_resolve_default_model_falls_back_when_config_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"CODEX_HOME": tmp}, clear=False):
-                self.assertEqual(resolve_default_model(), "gpt-5")
+                self.assertEqual(resolve_default_model(), "gpt-5.1-codex")
 
     def test_resolve_default_model_prefers_project_config_over_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,16 +4,18 @@ import ast
 import atexit
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import inspect
 import json
+import math
 import os
 import random
 import signal
 import sys
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 from typing import Any, Awaitable, Callable, Mapping
@@ -22,7 +24,7 @@ from urllib.parse import urlparse
 import websockets
 
 DEFAULT_URI = "ws://127.0.0.1:8765"
-DEFAULT_MODEL = "gpt-5"
+DEFAULT_MODEL = "gpt-5.1-codex"
 DEFAULT_UNLOAD_GRACE_PERIOD = 30 * 60
 DEFAULT_WAIT_TURN_TIMEOUT = 300.0
 DEFAULT_WAIT_TURN_POLL_INTERVAL = 1.0
@@ -218,6 +220,10 @@ class ProtocolParseError(RuntimeError):
     """Raised when the server sends malformed JSON-RPC payloads."""
 
 
+class BoundedProtocolError(ProtocolParseError):
+    """Raised when the bounded one-request adapter must fail closed."""
+
+
 class RpcError(RuntimeError):
     """Structured JSON-RPC error returned by the app-server."""
 
@@ -265,6 +271,12 @@ class TurnDeadline:
     def __init__(self, seconds: float | None) -> None:
         self.deadline = None if seconds is None or seconds <= 0 else monotonic() + seconds
 
+    @classmethod
+    def from_absolute(cls, deadline: float) -> "TurnDeadline":
+        result = cls.__new__(cls)
+        result.deadline = deadline
+        return result
+
     def remaining_timeout(self, per_wait_timeout: float | None) -> float | None:
         if self.deadline is None:
             return per_wait_timeout
@@ -276,12 +288,607 @@ class TurnDeadline:
         return min(per_wait_timeout, remaining)
 
 
+class DeadlineBudget:
+    """The minimum of several absolute deadlines, with no deadline renewal."""
+
+    def __init__(self, *deadlines: TurnDeadline) -> None:
+        self.deadlines = tuple(deadlines)
+
+    def remaining_timeout(self, per_wait_timeout: float | None) -> float | None:
+        remaining = [deadline.remaining_timeout(None) for deadline in self.deadlines]
+        if not remaining:
+            return per_wait_timeout
+        minimum = min(remaining)
+        if per_wait_timeout is None:
+            return minimum
+        return min(per_wait_timeout, minimum)
+
+
 def is_server_request(message: dict[str, Any]) -> bool:
     return "id" in message and "method" in message and "result" not in message and "error" not in message
 
 
 def is_notification(message: dict[str, Any]) -> bool:
     return "method" in message and "id" not in message and "result" not in message and "error" not in message
+
+
+def _same_response_id(expected: str | int, actual: Any) -> bool:
+    return type(actual) is type(expected) and actual == expected
+
+
+CoreMessageHandler = Callable[[Any, dict[str, Any], int], Awaitable[bool]]
+
+
+class JsonRpcCore:
+    """Shared framing, parsing, correlation, and interleaving mechanics."""
+
+    def __init__(
+        self,
+        ws: Any,
+        *,
+        pending_messages: deque[dict[str, Any]] | None = None,
+        max_frame_bytes: int | None = None,
+        max_total_bytes: int | None = None,
+        trace: bool = True,
+    ) -> None:
+        self.ws = ws
+        self.pending_messages = pending_messages
+        self.max_frame_bytes = max_frame_bytes
+        self.max_total_bytes = max_total_bytes
+        self.trace = trace
+        self.total_bytes = 0
+
+    def _record_frame(self, raw: str | bytes) -> None:
+        frame_bytes = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+        if self.max_frame_bytes is not None and len(frame_bytes) > self.max_frame_bytes:
+            raise BoundedProtocolError("App Server frame limit exceeded")
+        if self.max_total_bytes is not None and self.total_bytes + len(frame_bytes) > self.max_total_bytes:
+            raise BoundedProtocolError("App Server aggregate byte limit exceeded")
+        self.total_bytes += len(frame_bytes)
+
+    async def send_json(self, payload: dict[str, Any], deadline: Any = None) -> None:
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self._record_frame(raw)
+        wait_timeout = deadline.remaining_timeout(None) if deadline else None
+        if wait_timeout is not None and wait_timeout <= 0:
+            raise asyncio.TimeoutError()
+        await asyncio.wait_for(self.ws.send(raw), timeout=wait_timeout)
+        if self.trace:
+            write_ndjson("send", payload)
+
+    async def send_notification(
+        self,
+        method: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        deadline: Any = None,
+        include_jsonrpc: bool = True,
+    ) -> None:
+        payload: dict[str, Any] = {"method": method}
+        if include_jsonrpc:
+            payload["jsonrpc"] = "2.0"
+        if params is not None:
+            payload["params"] = dict(params)
+        await self.send_json(payload, deadline)
+
+    async def receive_json(self, timeout: float | None, deadline: Any = None) -> dict[str, Any]:
+        wait_timeout = deadline.remaining_timeout(timeout) if deadline else timeout
+        if wait_timeout is not None and wait_timeout <= 0:
+            raise asyncio.TimeoutError()
+        try:
+            raw = await asyncio.wait_for(self.ws.recv(), timeout=wait_timeout)
+        except asyncio.TimeoutError:
+            raise
+        except Exception as exc:
+            raise ProtocolParseError("App Server transport closed") from exc
+        if not isinstance(raw, (str, bytes)):
+            raise ProtocolParseError("App Server frame has an invalid type")
+        self._record_frame(raw)
+        try:
+            message = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProtocolParseError("App Server frame is not valid JSON") from exc
+        if not isinstance(message, dict):
+            raise ProtocolParseError("App Server message is not an object")
+        if self.trace:
+            params = message.get("params")
+            turn_id = params.get("turnId", "") if isinstance(params, Mapping) else ""
+            write_ndjson("recv", message, turn_id)
+        return message
+
+    async def next_message(self, timeout: float | None, deadline: Any = None) -> dict[str, Any]:
+        if self.pending_messages:
+            return self.pending_messages.popleft()
+        return await self.receive_json(timeout, deadline)
+
+    async def request_once(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        request_id: str | int,
+        timeout: float | None,
+        deadline: Any = None,
+        handle_server_request: CoreMessageHandler | None = None,
+        handle_notification: CoreMessageHandler | None = None,
+        verbosity: int = 0,
+        buffer_unmatched: bool = True,
+        strict_response: bool = False,
+        error_factory: Callable[[str], Exception] | None = None,
+        include_jsonrpc: bool = True,
+    ) -> Any:
+        payload: dict[str, Any] = {"id": request_id, "method": method, "params": dict(params)}
+        if include_jsonrpc:
+            payload["jsonrpc"] = "2.0"
+        await self.send_json(payload, deadline)
+
+        async def process(message: dict[str, Any]) -> tuple[bool, Any]:
+            if handle_server_request is not None and await handle_server_request(self.ws, message, verbosity):
+                return False, None
+            if is_notification(message) and handle_notification is not None:
+                if await handle_notification(self.ws, message, verbosity):
+                    return False, None
+            if strict_response and is_server_request(message):
+                raise BoundedProtocolError("App Server server-request messages are not supported")
+            if strict_response and "method" in message:
+                raise BoundedProtocolError("App Server response/request hybrid is invalid")
+            if "id" in message and _same_response_id(request_id, message.get("id")):
+                has_result = "result" in message
+                has_error = "error" in message
+                if strict_response and has_result == has_error:
+                    raise BoundedProtocolError("App Server response must contain exactly one result or error")
+                if has_error:
+                    if error_factory is not None:
+                        raise error_factory("App Server returned an error response")
+                    raise RpcError.from_payload(message, method)
+                if strict_response and not has_result:
+                    raise BoundedProtocolError("App Server response has no result")
+                return True, message.get("result", {})
+            if not buffer_unmatched and "method" in message and "id" in message:
+                raise BoundedProtocolError("App Server server-request messages are not supported")
+            if buffer_unmatched and self.pending_messages is not None:
+                self.pending_messages.append(message)
+                return False, None
+            raise BoundedProtocolError("App Server response id did not correlate")
+
+        if self.pending_messages:
+            pending_count = len(self.pending_messages)
+            for _ in range(pending_count):
+                matched, result = await process(self.pending_messages.popleft())
+                if matched:
+                    return result
+        while True:
+            matched, result = await process(await self.receive_json(timeout, deadline))
+            if matched:
+                return result
+
+
+_SOURCE_SERVER_NOTIFICATION_METHODS = frozenset(
+    {
+        "account/login/completed",
+        "account/rateLimits/updated",
+        "account/updated",
+        "app/list/updated",
+        "autoApprovalReview/strictReviewRequired",
+        "command/exec/outputDelta",
+        "configWarning",
+        "deprecationNotice",
+        "error",
+        "externalAgentConfig/import/completed",
+        "externalAgentConfig/import/progress",
+        "fs/changed",
+        "fuzzyFileSearch/sessionCompleted",
+        "fuzzyFileSearch/sessionUpdated",
+        "guardianWarning",
+        "hook/completed",
+        "hook/started",
+        "item/agentMessage/delta",
+        "item/autoApprovalReview/completed",
+        "item/autoApprovalReview/started",
+        "item/commandExecution/outputDelta",
+        "item/commandExecution/terminalInteraction",
+        "item/completed",
+        "item/fileChange/outputDelta",
+        "item/fileChange/patchUpdated",
+        "item/mcpToolCall/progress",
+        "item/plan/delta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+        "item/started",
+        "mcpServer/event/stream/notification",
+        "mcpServer/oauthLogin/completed",
+        "mcpServer/startupStatus/updated",
+        "model/rerouted",
+        "model/safetyBuffering/updated",
+        "model/verification",
+        "modelProvider/authRecoveryCompleted",
+        "modelProvider/authRecoveryStarted",
+        "process/exited",
+        "process/outputDelta",
+        "project/changed",
+        "rawResponse/completed",
+        "rawResponseItem/completed",
+        "remoteControl/status/changed",
+        "serverRequest/resolved",
+        "skills/changed",
+        "thread/archived",
+        "thread/closed",
+        "thread/compacted",
+        "thread/deleted",
+        "thread/environment/connected",
+        "thread/environment/disconnected",
+        "thread/goal/cleared",
+        "thread/goal/updated",
+        "thread/name/updated",
+        "thread/project/updated",
+        "thread/queue/changed",
+        "thread/realtime/closed",
+        "thread/realtime/error",
+        "thread/realtime/item/completed",
+        "thread/realtime/item/started",
+        "thread/realtime/item/transcript/delta",
+        "thread/realtime/itemAdded",
+        "thread/realtime/outputAudio/delta",
+        "thread/realtime/sdp",
+        "thread/realtime/started",
+        "thread/realtime/transcript/delta",
+        "thread/realtime/transcript/done",
+        "thread/reverted",
+        "thread/settings/updated",
+        "thread/started",
+        "thread/status/changed",
+        "thread/tokenUsage/updated",
+        "thread/unarchived",
+        "turn/completed",
+        "turn/diff/updated",
+        "turn/moderationMetadata",
+        "turn/plan/updated",
+        "turn/started",
+        "warning",
+        "windows/worldWritableWarning",
+        "windowsSandbox/setupCompleted",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ServerNotificationEnvelope:
+    """The source-defined flattened app-server notification envelope.
+
+    The current protocol serializes ``method`` and ``params`` at the top level
+    and optionally adds ``emittedAtMs``.  The raw mapping is intentionally not
+    retained by the bounded adapter's result object.
+    """
+
+    method: str
+    params: Mapping[str, Any]
+    emitted_at_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class NotificationObservation:
+    """A caller-approved, sanitized notification classification."""
+
+    method: str
+    classification: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.method, str) or not self.method:
+            raise ValueError("notification observation method must be non-empty")
+        if (
+            not isinstance(self.classification, str)
+            or not self.classification
+            or len(self.classification) > 64
+            or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-" for char in self.classification)
+        ):
+            raise ValueError("notification observation classification must be a short safe token")
+
+
+NotificationValidator = Callable[[ServerNotificationEnvelope], NotificationObservation]
+
+
+def parse_server_notification_envelope(message: Mapping[str, Any]) -> ServerNotificationEnvelope:
+    """Validate the current source/schema notification envelope.
+
+    This intentionally validates only the shared wire shape.  Notification
+    parameter policy belongs to the caller-supplied validator.
+    """
+
+    if not isinstance(message, Mapping):
+        raise BoundedProtocolError("server notification is not an object")
+    if set(message) - {"method", "params", "emittedAtMs"}:
+        raise BoundedProtocolError("server notification has unexpected fields")
+    method = message.get("method")
+    if not isinstance(method, str) or not method:
+        raise BoundedProtocolError("server notification method is invalid")
+    if method not in _SOURCE_SERVER_NOTIFICATION_METHODS:
+        raise BoundedProtocolError("unknown App Server notification")
+    params = message.get("params")
+    if not isinstance(params, Mapping):
+        raise BoundedProtocolError("server notification params are invalid")
+    emitted_at_ms = message.get("emittedAtMs")
+    if emitted_at_ms is not None and (
+        isinstance(emitted_at_ms, bool)
+        or not isinstance(emitted_at_ms, int)
+        or not -(2**63) <= emitted_at_ms <= 2**63 - 1
+    ):
+        raise BoundedProtocolError("server notification timestamp is invalid")
+    return ServerNotificationEnvelope(method, params, emitted_at_ms)
+
+
+@dataclass(frozen=True)
+class BoundedClientProfile:
+    """Explicit transport limits for one bounded App Server connection."""
+
+    uri: str
+    attempt_timeout: float = 60.0
+    connect_timeout: float = 10.0
+    request_timeout: float = 30.0
+    close_timeout: float = 2.0
+    max_frame_bytes: int = 1_048_576
+    max_total_bytes: int = 8_000_000
+    max_notifications: int = 8
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
+    notification_validator: NotificationValidator | None = field(default=None, repr=False, compare=False)
+    known_notification_methods: frozenset[str] = field(
+        default=_SOURCE_SERVER_NOTIFICATION_METHODS, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        parsed = urlparse(self.uri)
+        if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+            raise ValueError("uri must be an absolute ws:// or wss:// endpoint")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("uri must not contain credentials; use explicit headers")
+        for name in ("attempt_timeout", "connect_timeout", "request_timeout", "close_timeout"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite positive number")
+        for name in ("max_frame_bytes", "max_total_bytes", "max_notifications"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.max_total_bytes < self.max_frame_bytes:
+            raise ValueError("max_total_bytes must be at least max_frame_bytes")
+        if self.notification_validator is not None and not callable(self.notification_validator):
+            raise ValueError("notification_validator must be callable")
+        object.__setattr__(self, "headers", dict(self.headers))
+        object.__setattr__(self, "known_notification_methods", frozenset(self.known_notification_methods))
+
+
+@dataclass(frozen=True)
+class BoundedRequestResult:
+    """Correlated response plus sanitized interleaved notifications."""
+
+    result: Any
+    notifications: tuple[NotificationObservation, ...]
+
+
+class BoundedAppServerClient:
+    """One-shot, fail-closed App Server adapter for non-conversational callers.
+
+    Unlike :class:`ProtocolClient`, this class never retries, buffers unrelated
+    messages, invokes server-request handlers, writes NDJSON, or retains raw
+    notifications.  The caller supplies the JSON-RPC request id and a narrow
+    notification validator.
+    """
+
+    def __init__(self, profile: BoundedClientProfile, ws: Any, *, attempt_deadline: TurnDeadline | None = None) -> None:
+        self.profile = profile
+        self.ws = ws
+        self._core = JsonRpcCore(
+            ws,
+            max_frame_bytes=profile.max_frame_bytes,
+            max_total_bytes=profile.max_total_bytes,
+            trace=False,
+        )
+        self._closed = False
+        self._seen_response_ids: set[str | int] = set()
+        self._attempt_deadline = attempt_deadline or TurnDeadline(profile.attempt_timeout)
+        self._notification_count = 0
+
+    @classmethod
+    async def connect(cls, profile: BoundedClientProfile) -> "BoundedAppServerClient":
+        attempt_deadline = TurnDeadline(profile.attempt_timeout)
+        connect_budget = DeadlineBudget(attempt_deadline, TurnDeadline(profile.connect_timeout))
+        try:
+            async with asyncio.timeout(connect_budget.remaining_timeout(None)):
+                kwargs: dict[str, Any] = {"max_size": profile.max_frame_bytes}
+                kwargs["proxy"] = None
+                if profile.headers:
+                    kwargs["additional_headers"] = dict(profile.headers)
+                ws = await websockets.connect(profile.uri, **kwargs)
+        except asyncio.TimeoutError:
+            raise BoundedProtocolError("bounded App Server connection timed out") from None
+        except Exception:
+            raise BoundedProtocolError("bounded App Server connection failed") from None
+        return cls(profile, ws, attempt_deadline=attempt_deadline)
+
+    async def __aenter__(self) -> "BoundedAppServerClient":
+        return self
+
+    async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        await self.close()
+
+    def _budget(self, deadline: float | None = None) -> DeadlineBudget:
+        deadlines = [self._attempt_deadline, TurnDeadline(self.profile.request_timeout)]
+        if deadline is not None:
+            deadlines.append(TurnDeadline.from_absolute(deadline))
+        return DeadlineBudget(*deadlines)
+
+    def _abort_transport(self) -> None:
+        transport = getattr(self.ws, "transport", None)
+        abort = getattr(transport, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
+            return
+        fail_connection = getattr(self.ws, "fail_connection", None)
+        if callable(fail_connection):
+            try:
+                fail_connection()
+            except Exception:
+                pass
+            return
+        transport_close = getattr(transport, "close", None)
+        if callable(transport_close):
+            try:
+                transport_close()
+            except Exception:
+                pass
+
+    async def _close_after_cancellation(self) -> None:
+        self._closed = True
+        self._abort_transport()
+
+    async def _handle_bounded_notification(
+        self,
+        _ws: Any,
+        message: dict[str, Any],
+        _verbosity: int,
+        notifications: list[NotificationObservation],
+    ) -> bool:
+        envelope = parse_server_notification_envelope(message)
+        if envelope.method not in self.profile.known_notification_methods:
+            raise BoundedProtocolError("unknown App Server notification")
+        if self._notification_count >= self.profile.max_notifications:
+            raise BoundedProtocolError("App Server notification limit exceeded")
+        self._notification_count += 1
+        validator = self.profile.notification_validator
+        if validator is None:
+            raise BoundedProtocolError("App Server notification was not admitted")
+        try:
+            observation = validator(envelope)
+        except BoundedProtocolError:
+            raise
+        except Exception:
+            raise BoundedProtocolError("App Server notification was rejected") from None
+        if not isinstance(observation, NotificationObservation) or observation.method != envelope.method:
+            raise BoundedProtocolError("notification validator returned an invalid observation")
+        notifications.append(observation)
+        return True
+
+    async def send_initialized(self, *, deadline: float | None = None) -> None:
+        if self._closed:
+            raise BoundedProtocolError("bounded App Server client is closed")
+        budget = self._budget(deadline)
+        try:
+            await self._core.send_notification("initialized", deadline=budget, include_jsonrpc=False)
+        except asyncio.CancelledError:
+            await self._close_after_cancellation()
+            raise
+        except Exception:
+            await self.close(budget)
+            raise
+
+    async def initialize(
+        self,
+        *,
+        request_id: str | int = 0,
+        params: Mapping[str, Any] | None = None,
+        deadline: float | None = None,
+    ) -> BoundedRequestResult:
+        init_params = dict(
+            params
+            or {
+                "clientInfo": {"name": "codex-ws-client", "title": "Codex WS Client", "version": "0.5"},
+                "capabilities": {"experimentalApi": True},
+            }
+        )
+        result = await self.request("initialize", init_params, request_id=request_id, deadline=deadline)
+        await self.send_initialized(deadline=deadline)
+        return result
+
+    async def request(
+        self,
+        method: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        request_id: str | int,
+        deadline: float | None = None,
+    ) -> BoundedRequestResult:
+        if self._closed:
+            raise BoundedProtocolError("bounded App Server client is closed")
+        if not isinstance(method, str) or not method:
+            raise ValueError("method must be a non-empty string")
+        if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+            raise ValueError("request_id must be a string or integer")
+        if params is not None and not isinstance(params, Mapping):
+            raise ValueError("params must be an object")
+        if deadline is not None and (
+            not isinstance(deadline, (int, float))
+            or isinstance(deadline, bool)
+            or not math.isfinite(deadline)
+            or deadline <= 0
+        ):
+            raise ValueError("deadline must be a finite positive number")
+        budget = self._budget(deadline)
+        notifications: list[NotificationObservation] = []
+        try:
+            result = await self._core.request_once(
+                method,
+                dict(params or {}),
+                request_id=request_id,
+                timeout=None,
+                deadline=budget,
+                handle_notification=lambda ws, message, verbosity: self._handle_bounded_notification(
+                    ws, message, verbosity, notifications
+                ),
+                buffer_unmatched=False,
+                strict_response=True,
+                error_factory=lambda _message: BoundedProtocolError("App Server returned an error response"),
+                include_jsonrpc=False,
+            )
+            if request_id in self._seen_response_ids:
+                raise BoundedProtocolError("duplicate App Server response id")
+            self._seen_response_ids.add(request_id)
+            return BoundedRequestResult(result, tuple(notifications))
+        except asyncio.CancelledError:
+            await self._close_after_cancellation()
+            raise
+        except asyncio.TimeoutError:
+            await self.close(budget)
+            raise BoundedProtocolError("bounded App Server request deadline exceeded") from None
+        except BoundedProtocolError:
+            await self.close(budget)
+            raise
+        except Exception:
+            await self.close(budget)
+            raise BoundedProtocolError("bounded App Server request failed") from None
+
+    async def close(self, deadline: Any = None) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        timeout = self.profile.close_timeout
+        budget = deadline or DeadlineBudget(self._attempt_deadline)
+        if timeout <= 0:
+            return
+        try:
+            timeout = budget.remaining_timeout(timeout) or 0
+            if timeout <= 0:
+                self._abort_transport()
+                return
+            await asyncio.wait_for(self.ws.close(), timeout=timeout)
+        except asyncio.CancelledError:
+            self._abort_transport()
+            raise
+        except Exception:
+            self._abort_transport()
+
+
+@asynccontextmanager
+async def open_bounded_client(profile: BoundedClientProfile):
+    """Open exactly one bounded connection and always close it on exit."""
+
+    client = await BoundedAppServerClient.connect(profile)
+    try:
+        yield client
+    finally:
+        await client.close()
 
 
 ServerRequestHandler = Callable[[Any, dict[str, Any], int], Awaitable[bool]]
@@ -315,23 +922,14 @@ class ProtocolClient:
         self.handle_notification = handle_notification
         self.verbosity = verbosity
         self.retry = retry
+        self._core = JsonRpcCore(ws, pending_messages=self.pending_messages, trace=True)
 
     async def _recv_ws_json(self, timeout: float | None, deadline: TurnDeadline | None = None) -> dict[str, Any]:
-        wait_timeout = deadline.remaining_timeout(timeout) if deadline else timeout
-        raw = await asyncio.wait_for(self.ws.recv(), timeout=wait_timeout)
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ProtocolParseError(f"Failed to parse server message as JSON: {exc}") from exc
-        write_ndjson("recv", msg, msg.get("params", {}).get("turnId", ""))
-        return msg
+        return await self._core.receive_json(timeout, deadline)
 
     async def recv_json(self, timeout: float | None, deadline: TurnDeadline | None = None) -> dict[str, Any]:
         while True:
-            if self.pending_messages:
-                msg = self.pending_messages.popleft()
-            else:
-                msg = await self._recv_ws_json(timeout, deadline)
+            msg = await self._core.next_message(timeout, deadline)
             if await self.handle_server_request(self.ws, msg, self.verbosity):
                 continue
             if is_notification(msg) and await self.handle_notification(self.ws, msg, self.verbosity):
@@ -367,33 +965,18 @@ class ProtocolClient:
         deadline: TurnDeadline | None,
     ) -> dict[str, Any]:
         req_id = str(uuid.uuid4())
-        payload = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-        write_ndjson("send", payload)
-        await self.ws.send(json.dumps(payload))
-
-        for _ in range(len(self.pending_messages)):
-            message = self.pending_messages.popleft()
-            if await self.handle_server_request(self.ws, message, self.verbosity):
-                continue
-            if is_notification(message) and await self.handle_notification(self.ws, message, self.verbosity):
-                continue
-            if message.get("id") == req_id:
-                if "error" in message:
-                    raise RpcError.from_payload(message, method)
-                return message.get("result", {})
-            self.pending_messages.append(message)
-
-        while True:
-            message = await self._recv_ws_json(timeout, deadline)
-            if await self.handle_server_request(self.ws, message, self.verbosity):
-                continue
-            if is_notification(message) and await self.handle_notification(self.ws, message, self.verbosity):
-                continue
-            if message.get("id") == req_id:
-                if "error" in message:
-                    raise RpcError.from_payload(message, method)
-                return message.get("result", {})
-            self.pending_messages.append(message)
+        return await self._core.request_once(
+            method,
+            params,
+            request_id=req_id,
+            timeout=timeout,
+            deadline=deadline,
+            handle_server_request=self.handle_server_request,
+            handle_notification=self.handle_notification,
+            verbosity=self.verbosity,
+            buffer_unmatched=True,
+            strict_response=False,
+        )
 
     async def initialize(self, timeout: float | None) -> None:
         await self.request(
@@ -401,7 +984,7 @@ class ProtocolClient:
             {"clientInfo": {"name": "codex-ws-client", "title": "Codex WS Client", "version": "0.5"}, "capabilities": {"experimentalApi": True}},
             timeout=timeout,
         )
-        await self.ws.send(json.dumps({"jsonrpc": "2.0", "method": "initialized", "params": {}}))
+        await self._core.send_notification("initialized", {}, include_jsonrpc=True)
 
     async def start_thread(self, params: dict[str, Any], timeout: float | None) -> dict[str, Any]:
         return await self.request("thread/start", params, timeout=timeout)
@@ -751,6 +1334,11 @@ async def default_server_request_handler(ws: Any, message: dict[str, Any], _verb
             result = {"permissions": {}, "scope": "turn"}
     elif method == "mcpServer/elicitation/request":
         result = {"action": "decline"}
+    elif method == "item/tool/requestUserInput":
+        # The current v2 server request requires an answers map.  The
+        # non-interactive client has no user-input channel, so decline by
+        # returning the schema-valid empty answer set.
+        result = {"answers": {}}
     elif method == "item/tool/call":
         result = {"success": False, "contentItems": []}
     else:
@@ -841,6 +1429,7 @@ def make_thread_params(
     developer_instructions: str,
     *,
     include_sandbox: bool = True,
+    exclude_turns: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "approvalPolicy": "never",
@@ -865,6 +1454,8 @@ def make_thread_params(
     workspace_roots = list(getattr(args, "runtime_workspace_root", ()) or ())
     if workspace_roots:
         params["runtimeWorkspaceRoots"] = workspace_roots
+    if exclude_turns:
+        params["excludeTurns"] = True
     return params
 
 
@@ -953,7 +1544,7 @@ def turn_metrics(
     usage_candidates = [usage_override] if usage_override is not None else []
     usage_candidates += [turn.get(key) for key in ("usage", "tokenUsage", "token_usage", "metrics")]
     usage = next((candidate for candidate in usage_candidates if isinstance(candidate, Mapping)), {})
-    nested_usage = _first(usage, "lastTokenUsage", "last_token_usage")
+    nested_usage = _first(usage, "lastTokenUsage", "last_token_usage", "last")
     if isinstance(nested_usage, Mapping):
         usage = nested_usage
     input_details = _first(usage, "input_tokens_details", "inputTokensDetails")
@@ -1188,7 +1779,13 @@ async def ensure_thread(
             if args.print_thread_id:
                 print(f"THREAD_ID={thread_id}", file=sys.stderr)
             return thread_id, False
-        params = make_thread_params(args, cwd, args.instructions or "Answer concisely.", include_sandbox=False)
+        params = make_thread_params(
+            args,
+            cwd,
+            args.instructions or "Answer concisely.",
+            include_sandbox=False,
+            exclude_turns=True,
+        )
         params["threadId"] = args.thread_id
         result = await client.resume_thread(params, resume_timeout)
         status = result.get("thread", {}).get("status", {})
@@ -1799,7 +2396,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="", help="Model to use. If omitted, read ~/.codex/config.toml and fall back to the client default.")
     parser.add_argument(
         "--effort",
-        choices=("none", "minimal", "low", "medium", "high", "xhigh"),
+        choices=("none", "minimal", "low", "medium", "high", "xhigh", "ultra"),
         default="",
         help="Reasoning effort for the turn; omitted uses the server/model default.",
     )
@@ -1986,7 +2583,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-title", default="", help="thread/list title filter.")
     parser.add_argument("--threads-cursor", default="", metavar="CURSOR", help="Pagination cursor for --list-threads.")
     parser.add_argument("--threads-limit", type=int, default=50, metavar="N", help="Page size for --list-threads (default 50).")
-    parser.add_argument("--threads-sort-key", choices=("created_at", "updated_at", "recency_at"), default="updated_at")
+    parser.add_argument(
+        "--threads-sort-key",
+        choices=("created_at", "updated_at", "recency_at", "section_position"),
+        default="updated_at",
+    )
     parser.add_argument("--threads-sort-direction", choices=("asc", "desc"), default="desc")
     parser.add_argument("--model-provider", action="append", default=[], help="Repeatable thread/list modelProviders filter.")
     parser.add_argument("--source-kind", action="append", default=[], help="Repeatable thread/list sourceKinds filter.")
