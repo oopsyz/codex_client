@@ -41,6 +41,7 @@ EXIT_SIGINT = 130
 
 BOM = "﻿"
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
+APPROVAL_POLICY_CHOICES = ("untrusted", "on-request", "never")
 
 _ndjson_file = None
 _interactive_approvals_enabled = False
@@ -1432,7 +1433,7 @@ def make_thread_params(
     exclude_turns: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
-        "approvalPolicy": "never",
+        "approvalPolicy": effective_approval_policy(args),
         "model": args.model,
         "personality": args.personality,
         "developerInstructions": developer_instructions,
@@ -1457,6 +1458,16 @@ def make_thread_params(
     if exclude_turns:
         params["excludeTurns"] = True
     return params
+
+
+def effective_approval_policy(args: argparse.Namespace) -> str:
+    """Resolve the wire policy without broadening non-interactive runs."""
+    configured = str(getattr(args, "approval_policy", "") or "").strip()
+    if configured:
+        return configured
+    if getattr(args, "repl", False) and getattr(args, "interactive_approvals", False):
+        return "on-request"
+    return "never"
 
 
 def make_json_result(
@@ -1568,7 +1579,11 @@ def turn_metrics(
 
 
 def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, prompt: str) -> dict[str, Any]:
-    params: dict[str, Any] = {"threadId": thread_id, "approvalPolicy": "never", "input": [{"type": "text", "text": prompt}]}
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "approvalPolicy": effective_approval_policy(args),
+        "input": [{"type": "text", "text": prompt}],
+    }
     effort = str(getattr(args, "effort", "") or "").strip()
     if effort:
         params["effort"] = effort
@@ -2428,6 +2443,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repl", action="store_true")
     parser.add_argument("--detach", action="store_true", help="Start a turn, unsubscribe from the thread, print IDs, and exit without waiting for completion.")
     parser.add_argument("--interactive-approvals", action="store_true")
+    parser.add_argument(
+        "--approval-policy",
+        choices=APPROVAL_POLICY_CHOICES,
+        default="",
+        help=(
+            "App-server approval policy. Defaults to on-request for REPL interactive approvals "
+            "and never otherwise."
+        ),
+    )
     parser.add_argument("--output-schema", default="")
     parser.add_argument("--summary", action="store_true")
     parser.add_argument("--ndjson-file", default="")

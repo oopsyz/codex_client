@@ -249,6 +249,10 @@ REPL with interactive approvals:
 python skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --interactive-approvals
 ```
 
+Interactive REPL approval handling automatically selects the app-server
+`on-request` policy. Use `--approval-policy {untrusted,on-request,never}` to
+override it explicitly; non-interactive runs continue to default to `never`.
+
 Prompt from file:
 
 ```powershell

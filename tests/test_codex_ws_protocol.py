@@ -39,8 +39,10 @@ from codex_ws_client import (  # noqa: E402
     ensure_thread,
     extract_turn,
     active_turn_ids,
+    effective_approval_policy,
     is_terminal_turn_status,
     make_turn_params,
+    make_thread_params,
     run_detached_turn,
     run_thread_unload,
     run_turn,
@@ -1180,6 +1182,41 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "prompt"]):
             args = parse_args()
         self.assertIsNone(args.sandbox)
+
+    def test_approval_policy_defaults_to_never(self) -> None:
+        with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--sandbox", "read-only", "prompt"]):
+            args = parse_args()
+        self.assertEqual(effective_approval_policy(args), "never")
+        self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "never")
+        self.assertEqual(make_turn_params(args, "thread-1", "C:/repo", "prompt")["approvalPolicy"], "never")
+
+    def test_interactive_repl_uses_on_request_approval_policy(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--repl", "--interactive-approvals", "--sandbox", "read-only"],
+        ):
+            args = parse_args()
+        self.assertEqual(effective_approval_policy(args), "on-request")
+        self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "on-request")
+        self.assertEqual(make_turn_params(args, "thread-1", "C:/repo", "prompt")["approvalPolicy"], "on-request")
+
+    def test_explicit_approval_policy_overrides_mode_default(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--repl",
+                "--interactive-approvals",
+                "--approval-policy",
+                "untrusted",
+                "--sandbox",
+                "read-only",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(effective_approval_policy(args), "untrusted")
 
     def test_named_permissions_argument_is_explicit(self) -> None:
         with mock.patch.object(

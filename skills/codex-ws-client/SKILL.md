@@ -73,6 +73,10 @@ REPL (preferred for interactive multi-round sessions — single connection, no r
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-only --interactive-approvals
 ```
 
+`--interactive-approvals` selects the app-server `on-request` approval policy
+unless `--approval-policy` is supplied explicitly. Non-interactive commands keep
+the fail-closed `never` default.
+
 Resume a persisted thread:
 
 ```bash
@@ -138,6 +142,9 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox
 - In one-shot mode, stale resumed threads fail fast instead of silently switching context.
 - In REPL mode, `/new` starts a fresh thread.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.
+- `--approval-policy {untrusted,on-request,never}` explicitly selects the
+  app-server policy; the default is `on-request` for interactive REPL approval
+  handling and `never` otherwise.
 
 ## Output contract
 

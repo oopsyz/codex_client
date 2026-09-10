@@ -78,6 +78,11 @@ Commands:
 
 Interactive approvals:
 - only available with `--repl --interactive-approvals`
+- that combination selects `approvalPolicy: on-request` unless an explicit
+  `--approval-policy` is supplied
+- non-interactive commands default to `approvalPolicy: never`
+- use `--approval-policy {untrusted,on-request,never}` for an explicit protocol
+  selection
 
 ## Logging
 
