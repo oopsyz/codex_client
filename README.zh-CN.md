@@ -19,6 +19,7 @@
 它适用于需要完成以下任务的代理或脚本：
 
 - 向正在运行的 Codex app-server 发送提示词
+- 通过幂等键创建或恢复 App Server 项目，并把新线程绑定到该项目
 - 通过 `--thread-id` 复用已持久化的线程
 - 流式输出或缓冲输出助手响应
 - 获取机器可读的 JSON 输出
@@ -83,11 +84,23 @@ ws://127.0.0.1:8765
 1. 连接到 WebSocket
 2. 发送 `initialize`
 3. 发送 `initialized`
-4. 创建或恢复线程
-5. 发送 `turn/start`
-6. 持续消费流式通知，直到当前轮次结束
+4. 根据需要发送实验性的 `project/create`
+5. 创建新线程（可携带 `projectId`）或恢复已有线程
+6. 发送 `turn/start`
+7. 持续消费流式通知，直到当前轮次结束
 
 如果省略 `--cwd`，客户端会在协议参数中省略 `cwd`，由 `codex app-server` 使用它自己的默认工作区。
+
+创建项目时，必须提供至少一个 `--project-root` 和调用方保留的
+`--project-idempotency-key`。发生超时或断连后，应使用同一个幂等键进行
+恢复，而不是创建替代项目。`--project-id` 只适用于新线程，不能和
+`--thread-id` 同时使用。所有项目根目录、线程 CWD 和运行时工作区路径都
+属于 App Server 所在主机；远程 Linux 路径不会被改写成本机 Windows 路径。
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --create-project steward1 --project-root /srv/roles/steward1 --project-idempotency-key ATTEMPT_KEY
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PROJECT_ID --cwd /srv/roles/steward1 --runtime-workspace-root /srv/roles/steward1/repository-worktree --sandbox read-only "Inspect the assignment"
+```
 
 它可以处理：
 
@@ -102,6 +115,7 @@ ws://127.0.0.1:8765
 新线程：
 
 - 如果未传入 `--thread-id`，客户端会创建新线程
+- 可使用 `--project-id PROJECT_ID` 将新线程绑定到已存在的 App Server 项目
 
 恢复线程：
 

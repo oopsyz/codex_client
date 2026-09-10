@@ -31,6 +31,10 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --json --detach "prompt
 
 # Resume existing thread
 python skills/codex-ws-client/scripts/codex_ws_client.py --thread-id <id> "prompt"
+
+# Create or recover a project, then bind a new thread
+python skills/codex-ws-client/scripts/codex_ws_client.py --create-project steward1 --project-root /srv/roles/steward1 --project-idempotency-key ATTEMPT_KEY
+python skills/codex-ws-client/scripts/codex_ws_client.py --project-id PROJECT_ID --cwd /srv/roles/steward1 --runtime-workspace-root /srv/roles/steward1/repository-worktree --sandbox read-only "prompt"
 ```
 
 ## Skill Installation
@@ -57,9 +61,10 @@ Copy-Item -Recurse -Force skills/codex-ws-client $HOME/.codex/skills/codex-ws-cl
 
 1. WebSocket connect to `ws://127.0.0.1:8765` (configurable via `--uri`)
 2. JSON-RPC `initialize` + `initialized` handshake
-3. `thread/start` (new) or `thread/resume` (existing via `--thread-id`)
-4. `turn/start` with the prompt - stream deltas from server
-5. Handle server requests (approvals, elicitations) inline; auto-decline by default
+3. optional experimental `project/create` with a caller-retained idempotency key
+4. `thread/start` (optionally with `projectId`) or `thread/resume` (existing via `--thread-id`)
+5. `turn/start` with the prompt - stream deltas from server
+6. Handle server requests (approvals, elicitations) inline; auto-decline by default
 
 With `--detach`, the client sends `turn/start`, calls `thread/unsubscribe`, prints `thread_id`/`turn_id`, and exits without waiting for turn completion.
 
@@ -71,6 +76,8 @@ If `--cwd` is omitted, the client does not send `cwd` and the server uses its ow
 - `run_client()` - manages connection lifecycle
 - `run_turn()` - sends one prompt, streams response
 - `ensure_thread()` - creates or resumes a thread
+- `make_project_create_params()` - validates and builds `project/create` params
+- `ProtocolClient.create_project()` - sends non-overload-retried project creation
 - `ProtocolClient.request()` - generic JSON-RPC call with response matching
 - `default_server_request_handler()` - processes approval/elicitation requests mid-stream
 
