@@ -990,6 +990,10 @@ class ProtocolClient:
     async def start_thread(self, params: dict[str, Any], timeout: float | None) -> dict[str, Any]:
         return await self.request("thread/start", params, timeout=timeout)
 
+    async def create_project(self, params: dict[str, Any], timeout: float | None) -> dict[str, Any]:
+        """Create or recover one project through the server idempotency key."""
+        return await self.request("project/create", params, timeout=timeout, retry_overload=False)
+
     async def resume_thread(self, params: dict[str, Any], timeout: float | None) -> dict[str, Any]:
         return await self.request("thread/resume", params, timeout=timeout)
 
@@ -1430,6 +1434,7 @@ def make_thread_params(
     developer_instructions: str,
     *,
     include_sandbox: bool = True,
+    include_project: bool = True,
     exclude_turns: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
@@ -1452,11 +1457,40 @@ def make_thread_params(
             params["sandbox"] = sandbox
     if cwd is not None:
         params["cwd"] = cwd
+    project_id = str(getattr(args, "project_id", "") or "").strip()
+    if include_project and project_id:
+        params["projectId"] = project_id
     workspace_roots = list(getattr(args, "runtime_workspace_root", ()) or ())
     if workspace_roots:
         params["runtimeWorkspaceRoots"] = workspace_roots
     if exclude_turns:
         params["excludeTurns"] = True
+    return params
+
+
+def make_project_create_params(args: argparse.Namespace) -> dict[str, Any]:
+    name = str(getattr(args, "create_project", "") or "").strip()
+    roots = [normalize_protocol_cwd(value) for value in (getattr(args, "project_root", ()) or ())]
+    idempotency_key = str(getattr(args, "project_idempotency_key", "") or "").strip()
+    if not name:
+        raise ValueError("--create-project requires a non-empty name.")
+    if not roots or any(root is None for root in roots):
+        raise ValueError("--create-project requires at least one non-empty --project-root.")
+    if not idempotency_key:
+        raise ValueError("--create-project requires --project-idempotency-key.")
+    metadata: dict[str, str] = {}
+    for item in getattr(args, "project_metadata", ()) or ():
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise ValueError("--project-metadata must use KEY=VALUE with a non-empty key.")
+        metadata[key.strip()] = value
+    params: dict[str, Any] = {
+        "name": name,
+        "roots": [{"path": root} for root in roots],
+        "idempotencyKey": idempotency_key,
+    }
+    if metadata:
+        params["metadata"] = metadata
     return params
 
 
@@ -1799,6 +1833,7 @@ async def ensure_thread(
             cwd,
             args.instructions or "Answer concisely.",
             include_sandbox=False,
+            include_project=False,
             exclude_turns=True,
         )
         params["threadId"] = args.thread_id
@@ -2132,6 +2167,7 @@ async def run_client(args: argparse.Namespace) -> int:
         return EXIT_BAD_ARGS
     inspection_operation = any(
         (
+            args.create_project,
             args.list_threads,
             args.list_loaded_threads,
             args.read_thread,
@@ -2154,6 +2190,18 @@ async def run_client(args: argparse.Namespace) -> int:
     )
     if args.detach and inspection_operation:
         print("Cannot use --detach with inspection or thread-management commands.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.project_id and args.thread_id:
+        print("Cannot use --project-id when resuming with --thread-id.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.create_project:
+        try:
+            make_project_create_params(args)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_BAD_ARGS
+    elif args.project_root or args.project_idempotency_key or args.project_metadata:
+        print("--project-root, --project-idempotency-key and --project-metadata require --create-project.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
@@ -2203,6 +2251,10 @@ async def run_client(args: argparse.Namespace) -> int:
         async with ws:
             client = ProtocolClient(ws, handle_server_request=default_server_request_handler, handle_notification=default_notification_handler, verbosity=args.verbose)
             await client.initialize(timeout)
+            if args.create_project:
+                result = await client.create_project(make_project_create_params(args), timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
             if args.list_threads:
                 result = await client.list_threads(
                     timeout,
@@ -2436,6 +2488,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instructions", default="")
     parser.add_argument("--ephemeral", action="store_true")
     parser.add_argument("--thread-id", default="")
+    parser.add_argument(
+        "--project-id",
+        default="",
+        help="Experimental existing project id to bind on a new thread/start request.",
+    )
+    parser.add_argument(
+        "--create-project",
+        default="",
+        metavar="NAME",
+        help="Experimental: call project/create and print the server response.",
+    )
+    parser.add_argument(
+        "--project-root",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Absolute project root for --create-project; may be repeated.",
+    )
+    parser.add_argument(
+        "--project-idempotency-key",
+        default="",
+        metavar="KEY",
+        help="Opaque stable idempotency key required by --create-project.",
+    )
+    parser.add_argument(
+        "--project-metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Opaque project metadata for --create-project; may be repeated.",
+    )
     parser.add_argument("--print-thread-id", action="store_true")
     parser.add_argument("--prompt-file", default="")
     parser.add_argument("--json", action="store_true")

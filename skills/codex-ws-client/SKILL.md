@@ -117,6 +117,13 @@ Trace protocol traffic:
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox read-only --ndjson-file trace.jsonl "Return metadata"
 ```
 
+Create or recover a remote-host project, then bind a new thread to it:
+
+```bash
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --create-project steward1 --project-root /srv/roles/steward1 --project-idempotency-key ATTEMPT_KEY
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PROJECT_ID --cwd /srv/roles/steward1 --runtime-workspace-root /srv/roles/steward1/repository-worktree --sandbox read-only "Inspect the assignment"
+```
+
 ## Important behavior
 
 - Transport is WebSocket only.
@@ -132,6 +139,12 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --sandbox
 - `--runtime-workspace-root PATH` may be repeated and is sent on both
   `thread/start` and `turn/start`. Use it when the role/instruction `--cwd` is
   distinct from the writable output lease selected by the permission profile.
+- `--create-project NAME` calls experimental `project/create`; it requires one
+  or more `--project-root` values and a caller-retained
+  `--project-idempotency-key`. Unknown outcomes are reconciled by reusing that
+  key, not by creating a replacement project.
+- `--project-id ID` sends experimental `thread/start.projectId` for a new
+  thread. It cannot be combined with `--thread-id`.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
 - `--detach` returns `status: "detached"` for the client operation; inspect the returned turn later to determine whether the server completed it.
 - `--unload-thread` interrupts reported active turns, cleans background terminals, unsubscribes this client, and waits 30 minutes by default. `unload_status: "thread_closed"` is confirmation; elapsed time alone is not.
