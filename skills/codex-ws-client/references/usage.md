@@ -48,6 +48,16 @@ Fresh thread:
 - choose exactly one of `--sandbox read-only`, `--sandbox workspace-write`,
   `--sandbox danger-full-access`, or `--permissions PROFILE_ID`
 - never combine `--sandbox` with `--permissions`
+- optionally pass `--project-id PROJECT_ID` to bind the new thread to an
+  existing experimental App Server project
+
+Project creation:
+- use `--create-project NAME` with at least one `--project-root PATH`
+- supply a stable `--project-idempotency-key KEY`; reuse it after a timeout or
+  disconnect instead of inventing a replacement project
+- repeat `--project-metadata KEY=VALUE` for optional opaque string metadata
+- project roots, thread CWDs, and runtime workspace roots are paths on the App
+  Server host
 
 Model selection:
 - `--model` overrides the configured model

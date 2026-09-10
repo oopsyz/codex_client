@@ -126,6 +126,20 @@ SSH forward, a POSIX-absolute `--cwd` such as `/home/ec2-user/workspace` is
 sent unchanged. The client must not rewrite that server-side path into a
 local `C:\\home\\...` path.
 
+Experimental App Server projects are explicit. Create or recover one project
+with a caller-retained idempotency key, then pass its returned ID when starting
+a new thread:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --create-project steward1 --project-root /srv/roles/steward1 --project-idempotency-key ATTEMPT_KEY
+python skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PROJECT_ID --cwd /srv/roles/steward1 --runtime-workspace-root /srv/roles/steward1/repository-worktree --sandbox read-only "Inspect the assignment"
+```
+
+All paths are native to the App Server host. `project/create` is not overload-
+retried by the client; reuse the same idempotency key to reconcile an unknown
+outcome. `--project-id` applies only to a new thread and cannot be combined
+with `--thread-id`.
+
 It handles:
 
 - `item/agentMessage/delta`
@@ -145,6 +159,7 @@ Fresh thread:
 - `--sandbox` and `--permissions` cannot be combined
 - repeat `--runtime-workspace-root` to bind writable workspace roots without
   changing the instruction-discovery CWD
+- use `--project-id` to assign the new thread to an existing App Server project
 - `danger-full-access` is never selected implicitly
 
 Resumed thread:

@@ -43,6 +43,7 @@ from codex_ws_client import (  # noqa: E402
     is_terminal_turn_status,
     make_turn_params,
     make_thread_params,
+    make_project_create_params,
     run_detached_turn,
     run_thread_unload,
     run_turn,
@@ -1250,6 +1251,57 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             turn["runtimeWorkspaceRoots"], ["C:/output-a", "C:/output-b"]
         )
         self.assertEqual(turn["permissions"], "oa-review-output")
+
+    def test_project_create_params_preserve_remote_roots_and_metadata(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--create-project",
+                "steward1",
+                "--project-root",
+                "/srv/roles/steward1",
+                "--project-idempotency-key",
+                "attempt-1",
+                "--project-metadata",
+                "owner=oa-engine",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(
+            make_project_create_params(args),
+            {
+                "name": "steward1",
+                "roots": [{"path": "/srv/roles/steward1"}],
+                "idempotencyKey": "attempt-1",
+                "metadata": {"owner": "oa-engine"},
+            },
+        )
+
+    def test_new_thread_can_bind_existing_project(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["codex_ws_client.py", "--sandbox", "read-only", "--project-id", "project-1", "prompt"],
+        ):
+            args = parse_args()
+        self.assertEqual(make_thread_params(args, "C:/repo", "dev")["projectId"], "project-1")
+
+    async def test_protocol_client_project_create_is_not_overload_retried(self) -> None:
+        class CaptureClient(ProtocolClient):
+            async def request(self, method, params=None, **kwargs):
+                self.observed = (method, params, kwargs)
+                return {"project": {"id": "project-1"}}
+
+        client = CaptureClient(MockWebSocket([]))
+        result = await client.create_project(
+            {"name": "steward1", "roots": [{"path": "C:/roles/steward1"}], "idempotencyKey": "attempt-1"},
+            5,
+        )
+        self.assertEqual(result["project"]["id"], "project-1")
+        self.assertEqual(client.observed[0], "project/create")
+        self.assertFalse(client.observed[2]["retry_overload"])
 
     def test_reasoning_effort_is_sent_as_turn_effort(self) -> None:
         with mock.patch.object(
