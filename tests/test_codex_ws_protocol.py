@@ -44,6 +44,7 @@ from codex_ws_client import (  # noqa: E402
     make_turn_params,
     make_thread_params,
     make_project_create_params,
+    make_project_import_params,
     run_detached_turn,
     run_thread_unload,
     run_turn,
@@ -60,24 +61,27 @@ from codex_ws_client import (  # noqa: E402
     turn_metrics,
 )
 
+# Pinned from npm @openai/codex 0.154.0 (Windows x64), 2026-09-12.
+# generate-json-schema without --experimental; hashes normalize parsed JSON.
+# ../codex b1a547b1f73ce86205d9222ac19cff334b3b7a2e has the older snapshot.
 SCHEMA_MANIFEST = {
   "ClientNotification.json": "4446a1ae8626aa55d812836bfc2dae24213500d87c4759af2698f6199ea5b59f",
-  "ClientRequest.json": "c97c23877dd18a9fbc43a3bb87c72676acfbebdc14a2244342ee05dd95cfa38c",
+  "ClientRequest.json": "54f2e82388544ced959e8a20d655ae7921756859ad1b30368da581451878c34c",
   "JSONRPCError.json": "8835db6c4ada12ec628613fe2f571edc2c8fb55fc31bac706085e25ad1a08c0e",
-  "ServerNotification.json": "4035ecb68922741c577bb6570208c144916d919a023316f7194c5d5d30d92039",
-  "ServerRequest.json": "32f5e9fe877ff8d30a0255f7e68d63d6fcb616777a9fd0b0cf43f7b866c0627f",
-  "v2/ThreadListParams.json": "693ac88dd3c3c163b422aae3a57aef5c06c65240cc2c2011813d71db9bfc4867",
-  "v2/ThreadListResponse.json": "ca58e6edaded6165887236d1ef4ce35174e3315417327e5c52d6b27818f4edf2",
+  "ServerNotification.json": "e268e1eb11f90d13744753ad1685ec99f64d731afaca32edb8508d85297bca4a",
+  "ServerRequest.json": "c3d046f059f8e3ffba0b3f198e127715ea0c6556225d6e128879ca8f9c70f592",
+  "v2/ThreadListParams.json": "5e5cb38ddd9b54cd1b387de6104c2a61f505a3a924e090697be4c62009bf4666",
+  "v2/ThreadListResponse.json": "8cf369e1e2fdd796548228618880ab3188764e54c6193d0d0a37da4487243fa2",
   "v2/ThreadReadParams.json": "034ae7f41fe195edb1010ab8927ac4215caacabbf24f15da96170f604aacb901",
-  "v2/ThreadReadResponse.json": "8d079fb42a4faa554c39831e0a08a38cfecead5e0767a248f98c3b3640b6bae2",
-  "v2/ThreadResumeParams.json": "537f95411388c2a674f9b74751e6ac268fd83253a9a654a41240cf1826584cdc",
-  "v2/ThreadResumeResponse.json": "673ba797791fb67a4a5c6c69b4a98db1086ecc3c94f630c10c7a3839fa739ce7",
+  "v2/ThreadReadResponse.json": "016bdd5c625f087c64a0874ab4f448bca0f9dadbe49eea59f5cd9b7394032c78",
+  "v2/ThreadResumeParams.json": "67b1b0dc5c4cc3cbc9ff06ad3a7b7d99c4063b3ffc1d8608d35ab3a4897fa3d4",
+  "v2/ThreadResumeResponse.json": "daed3e19cbc3d719076314dbb907861dcae8f97521d90d51d0e9affd7999695e",
   "v2/ThreadStartParams.json": "278d25b0c1771eafc2e0bdaac84c5bbc2cfbd30cc4b1feb15511a74385b0ec95",
-  "v2/ThreadStartResponse.json": "46011408b2ed3cf1f187425238adc037531f8b1de5bd09695428c39b546b9be7",
+  "v2/ThreadStartResponse.json": "5f12184b5b04bedec229b3c83b2879e37f865abf43f66c52bdc32d82403261c6",
   "v2/TurnStartParams.json": "8a29a6fb75c063013567a01133fc4db4052771d22d3c88b634506f2a763df835",
   "v2/TurnStartResponse.json": "964fac59b8e94f4139d9091b6495da2e82a6cc1939f91c5669c8320fd53234d3",
   "v2/TurnSteerParams.json": "18daa1fcfb60873beb1e1b132e142acf9812b21d69c8ef7ea7803bb748f10df7",
-  "v2/TurnSteerResponse.json": "c0cee0b0c57af980fe2727679fbf2d3110ba28e8c9328f40d402fcc44ecb87bf",
+  "v2/TurnSteerResponse.json": "c0cee0b0c57af980fe2727679fbf2d3110ba28e8c9328f40d402fcc44ecb87bf"
 }
 
 
@@ -1288,6 +1292,33 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             args = parse_args()
         self.assertEqual(make_thread_params(args, "C:/repo", "dev")["projectId"], "project-1")
 
+    def test_project_import_params_attach_existing_threads(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "codex_ws_client.py",
+                "--import-project",
+                "steward1",
+                "--project-root",
+                "/srv/roles/steward1",
+                "--project-thread",
+                "thread-1",
+                "--project-idempotency-key",
+                "attempt-1",
+            ],
+        ):
+            args = parse_args()
+        self.assertEqual(
+            make_project_import_params(args),
+            {
+                "name": "steward1",
+                "roots": [{"path": "/srv/roles/steward1"}],
+                "threads": ["thread-1"],
+                "idempotencyKey": "attempt-1",
+            },
+        )
+
     async def test_protocol_client_project_create_is_not_overload_retried(self) -> None:
         class CaptureClient(ProtocolClient):
             async def request(self, method, params=None, **kwargs):
@@ -1301,6 +1332,26 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["project"]["id"], "project-1")
         self.assertEqual(client.observed[0], "project/create")
+        self.assertFalse(client.observed[2]["retry_overload"])
+
+    async def test_protocol_client_project_import_is_not_overload_retried(self) -> None:
+        class CaptureClient(ProtocolClient):
+            async def request(self, method, params=None, **kwargs):
+                self.observed = (method, params, kwargs)
+                return {"project": {"id": "project-1"}}
+
+        client = CaptureClient(MockWebSocket([]))
+        result = await client.import_project(
+            {
+                "name": "steward1",
+                "roots": [{"path": "C:/roles/steward1"}],
+                "threads": ["thread-1"],
+                "idempotencyKey": "attempt-1",
+            },
+            5,
+        )
+        self.assertEqual(result["project"]["id"], "project-1")
+        self.assertEqual(client.observed[0], "project/import")
         self.assertFalse(client.observed[2]["retry_overload"])
 
     def test_reasoning_effort_is_sent_as_turn_effort(self) -> None:
@@ -1688,7 +1739,7 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             schema_dir = Path(tmpdir)
             subprocess.run(["cmd", "/c", "codex", "app-server", "generate-json-schema", "--out", str(schema_dir)], check=True)
             for rel_path, expected_hash in SCHEMA_MANIFEST.items():
-                self.assertEqual(_hash_schema(schema_dir / rel_path), expected_hash)
+                self.assertEqual(_hash_schema(schema_dir / rel_path), expected_hash, rel_path)
 
     def test_schema_payloads_validate_against_installed_codex_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
