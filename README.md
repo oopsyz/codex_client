@@ -133,12 +133,35 @@ a new thread:
 ```powershell
 python skills/codex-ws-client/scripts/codex_ws_client.py --create-project steward1 --project-root /srv/roles/steward1 --project-idempotency-key ATTEMPT_KEY
 python skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PROJECT_ID --cwd /srv/roles/steward1 --runtime-workspace-root /srv/roles/steward1/repository-worktree --sandbox read-only "Inspect the assignment"
+python skills/codex-ws-client/scripts/codex_ws_client.py --import-project steward1 --project-root /srv/roles/steward1 --project-thread THREAD_ID --project-idempotency-key ATTEMPT_KEY
 ```
 
-All paths are native to the App Server host. `project/create` is not overload-
-retried by the client; reuse the same idempotency key to reconcile an unknown
-outcome. `--project-id` applies only to a new thread and cannot be combined
-with `--thread-id`.
+All paths are native to the App Server host. `project/create` and
+`project/import` are not overload-retried by the client; reuse the same
+idempotency key to reconcile an unknown outcome. `project/import` atomically
+attaches the listed existing threads. `--project-id` applies only to a new
+thread and cannot be combined with `--thread-id`.
+
+Use `--import-project` when existing persisted App Server threads need project
+membership; it requires at least one `--project-thread` and `--project-root`.
+It cannot be combined with `--create-project`, and `--project-thread` is valid
+only with import. The server validates thread eligibility and commits membership
+atomically. This is server-side project membership, not proof of Desktop Files,
+Terminal, role-kit activation, or attachment to a different App Server process.
+After a lost response, reconcile on the same server using the retained key and
+original inputs; do not create a replacement project or blindly retry.
+
+### Protocol maintenance checks
+
+Run `python -B -m pytest tests -q`. The schema manifests are pinned to the
+Windows x64 npm CLI `@openai/codex` **0.154.0**, generated with
+`codex app-server generate-json-schema`; project-import schemas additionally
+use `--experimental`. See [schema provenance](docs/protocol-schema-baseline.md).
+The project-import tests exercise the CLI parser and client through a local
+WebSocket fixture: initialization, experimental capability, membership
+notifications, JSON result, explicit same-key replay, server rejection,
+overload and lost connection. They create no real Codex task or model turn and
+do not replace the server's transaction tests or establish Desktop UI behavior.
 
 It handles:
 

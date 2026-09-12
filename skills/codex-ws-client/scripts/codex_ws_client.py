@@ -994,6 +994,10 @@ class ProtocolClient:
         """Create or recover one project through the server idempotency key."""
         return await self.request("project/create", params, timeout=timeout, retry_overload=False)
 
+    async def import_project(self, params: dict[str, Any], timeout: float | None) -> dict[str, Any]:
+        """Import a project and atomically attach its existing threads."""
+        return await self.request("project/import", params, timeout=timeout, retry_overload=False)
+
     async def resume_thread(self, params: dict[str, Any], timeout: float | None) -> dict[str, Any]:
         return await self.request("thread/resume", params, timeout=timeout)
 
@@ -1487,6 +1491,36 @@ def make_project_create_params(args: argparse.Namespace) -> dict[str, Any]:
     params: dict[str, Any] = {
         "name": name,
         "roots": [{"path": root} for root in roots],
+        "idempotencyKey": idempotency_key,
+    }
+    if metadata:
+        params["metadata"] = metadata
+    return params
+
+
+def make_project_import_params(args: argparse.Namespace) -> dict[str, Any]:
+    name = str(getattr(args, "import_project", "") or "").strip()
+    roots = [normalize_protocol_cwd(value) for value in (getattr(args, "project_root", ()) or ())]
+    threads = [str(value).strip() for value in (getattr(args, "project_thread", ()) or ())]
+    idempotency_key = str(getattr(args, "project_idempotency_key", "") or "").strip()
+    if not name:
+        raise ValueError("--import-project requires a non-empty name.")
+    if not roots or any(root is None for root in roots):
+        raise ValueError("--import-project requires at least one non-empty --project-root.")
+    if not threads or any(not thread for thread in threads):
+        raise ValueError("--import-project requires at least one non-empty --project-thread.")
+    if not idempotency_key:
+        raise ValueError("--import-project requires --project-idempotency-key.")
+    metadata: dict[str, str] = {}
+    for item in getattr(args, "project_metadata", ()) or ():
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip():
+            raise ValueError("--project-metadata must use KEY=VALUE with a non-empty key.")
+        metadata[key.strip()] = value
+    params: dict[str, Any] = {
+        "name": name,
+        "roots": [{"path": root} for root in roots],
+        "threads": threads,
         "idempotencyKey": idempotency_key,
     }
     if metadata:
@@ -2168,6 +2202,7 @@ async def run_client(args: argparse.Namespace) -> int:
     inspection_operation = any(
         (
             args.create_project,
+            args.import_project,
             args.list_threads,
             args.list_loaded_threads,
             args.read_thread,
@@ -2194,14 +2229,26 @@ async def run_client(args: argparse.Namespace) -> int:
     if args.project_id and args.thread_id:
         print("Cannot use --project-id when resuming with --thread-id.", file=sys.stderr)
         return EXIT_BAD_ARGS
+    if args.create_project and args.import_project:
+        print("Cannot combine --create-project with --import-project.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.project_thread and not args.import_project:
+        print("--project-thread requires --import-project.", file=sys.stderr)
+        return EXIT_BAD_ARGS
     if args.create_project:
         try:
             make_project_create_params(args)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_BAD_ARGS
-    elif args.project_root or args.project_idempotency_key or args.project_metadata:
-        print("--project-root, --project-idempotency-key and --project-metadata require --create-project.", file=sys.stderr)
+    elif args.import_project:
+        try:
+            make_project_import_params(args)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_BAD_ARGS
+    elif args.project_root or args.project_thread or args.project_idempotency_key or args.project_metadata:
+        print("Project roots, threads, idempotency keys and metadata require --create-project or --import-project.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
@@ -2253,6 +2300,10 @@ async def run_client(args: argparse.Namespace) -> int:
             await client.initialize(timeout)
             if args.create_project:
                 result = await client.create_project(make_project_create_params(args), timeout)
+                safe_print(json.dumps(result, indent=2))
+                return EXIT_SUCCESS
+            if args.import_project:
+                result = await client.import_project(make_project_import_params(args), timeout)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
             if args.list_threads:
@@ -2416,11 +2467,6 @@ async def run_client(args: argparse.Namespace) -> int:
     except ProtocolParseError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_PARSE_ERROR
-    except RuntimeError as exc:
-        if "Local stdout encoding failed" in str(exc):
-            print(str(exc), file=sys.stderr)
-            return EXIT_TURN_FAILURE
-        raise
     except RpcError as exc:
         if args.json:
             safe_print(
@@ -2436,6 +2482,11 @@ async def run_client(args: argparse.Namespace) -> int:
         else:
             print(f"RPC error [{exc.error_code}]: {exc.message}", file=sys.stderr)
         return EXIT_TURN_FAILURE
+    except RuntimeError as exc:
+        if "Local stdout encoding failed" in str(exc):
+            print(str(exc), file=sys.stderr)
+            return EXIT_TURN_FAILURE
+        raise
     except websockets.exceptions.ConnectionClosed as exc:
         print(f"WebSocket connection lost: {exc}", file=sys.stderr)
         return EXIT_CONNECTION_FAILURE
@@ -2500,24 +2551,37 @@ def parse_args() -> argparse.Namespace:
         help="Experimental: call project/create and print the server response.",
     )
     parser.add_argument(
+        "--import-project",
+        default="",
+        metavar="NAME",
+        help="Experimental: call project/import and atomically attach existing threads.",
+    )
+    parser.add_argument(
         "--project-root",
         action="append",
         default=[],
         metavar="PATH",
-        help="Absolute project root for --create-project; may be repeated.",
+        help="Absolute project root for --create-project or --import-project; may be repeated.",
+    )
+    parser.add_argument(
+        "--project-thread",
+        action="append",
+        default=[],
+        metavar="THREAD_ID",
+        help="Existing thread to attach with --import-project; may be repeated.",
     )
     parser.add_argument(
         "--project-idempotency-key",
         default="",
         metavar="KEY",
-        help="Opaque stable idempotency key required by --create-project.",
+        help="Opaque stable idempotency key required by --create-project or --import-project.",
     )
     parser.add_argument(
         "--project-metadata",
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Opaque project metadata for --create-project; may be repeated.",
+        help="Opaque project metadata for --create-project or --import-project; may be repeated.",
     )
     parser.add_argument("--print-thread-id", action="store_true")
     parser.add_argument("--prompt-file", default="")

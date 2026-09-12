@@ -122,6 +122,7 @@ Create or recover a remote-host project, then bind a new thread to it:
 ```bash
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --create-project steward1 --project-root /srv/roles/steward1 --project-idempotency-key ATTEMPT_KEY
 python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PROJECT_ID --cwd /srv/roles/steward1 --runtime-workspace-root /srv/roles/steward1/repository-worktree --sandbox read-only "Inspect the assignment"
+python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --import-project steward1 --project-root /srv/roles/steward1 --project-thread THREAD_ID --project-idempotency-key ATTEMPT_KEY
 ```
 
 ## Important behavior
@@ -143,6 +144,13 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --json --project
   or more `--project-root` values and a caller-retained
   `--project-idempotency-key`. Unknown outcomes are reconciled by reusing that
   key, not by creating a replacement project.
+- `--import-project NAME` calls experimental `project/import`; it requires one
+  or more `--project-root` and `--project-thread` values plus a caller-retained
+  `--project-idempotency-key`, and atomically attaches those existing threads.
+  Do not combine it with `--create-project`; `--project-thread` is import-only.
+  This establishes server project membership, not Desktop Files/Terminal or
+  role readiness. Reconcile unknown outcomes on the same server with the same
+  key and original inputs; no automatic overload replay is performed.
 - `--project-id ID` sends experimental `thread/start.projectId` for a new
   thread. It cannot be combined with `--thread-id`.
 - `--detach` starts a turn, calls `thread/unsubscribe`, and exits without waiting for completion; do not combine it with `--ephemeral`.
