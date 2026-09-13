@@ -258,6 +258,27 @@ class RpcError(RuntimeError):
         return result
 
 
+class BoundedRpcError(RpcError):
+    """Opt-in correlated RPC error; no automatic retry or connection close.
+
+    Owner: maintained client. Additive public seam, retained until explicit
+    retirement. Protocol/budget errors still fail closed.
+    """
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any], method: str = "") -> "BoundedRpcError":
+        error = payload.get("error")
+        if (not isinstance(error, dict) or type(error.get("code")) is not int
+                or not isinstance(error.get("message"), str)
+                or not set(error) <= {"code", "message", "data"}):
+            raise BoundedProtocolError("malformed App Server RPC error")
+        result = cls(error["code"], error["message"], error.get("data"), method)
+        result.rpc_response = json.loads(json.dumps(payload))
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**super().to_dict(), "rpc_response": self.rpc_response}
+
+
 @dataclass(frozen=True)
 class RetryConfig:
     attempts: int = 4
@@ -417,6 +438,7 @@ class JsonRpcCore:
         strict_response: bool = False,
         error_factory: Callable[[str], Exception] | None = None,
         include_jsonrpc: bool = True,
+        rpc_error_factory: Callable[[dict[str, Any], str], Exception] | None = None,
     ) -> Any:
         payload: dict[str, Any] = {"id": request_id, "method": method, "params": dict(params)}
         if include_jsonrpc:
@@ -439,6 +461,8 @@ class JsonRpcCore:
                 if strict_response and has_result == has_error:
                     raise BoundedProtocolError("App Server response must contain exactly one result or error")
                 if has_error:
+                    if rpc_error_factory is not None:
+                        raise rpc_error_factory(message, method)
                     if error_factory is not None:
                         raise error_factory("App Server returned an error response")
                     raise RpcError.from_payload(message, method)
@@ -635,8 +659,11 @@ class BoundedClientProfile:
     known_notification_methods: frozenset[str] = field(
         default=_SOURCE_SERVER_NOTIFICATION_METHODS, repr=False, compare=False
     )
+    preserve_rpc_errors: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.preserve_rpc_errors) is not bool:
+            raise ValueError("preserve_rpc_errors must be boolean")
         parsed = urlparse(self.uri)
         if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
             raise ValueError("uri must be an absolute ws:// or wss:// endpoint")
@@ -829,6 +856,8 @@ class BoundedAppServerClient:
         budget = self._budget(deadline)
         notifications: list[NotificationObservation] = []
         try:
+            if self.profile.preserve_rpc_errors and request_id in self._seen_response_ids:
+                raise BoundedProtocolError("duplicate App Server response id")
             result = await self._core.request_once(
                 method,
                 dict(params or {}),
@@ -841,12 +870,16 @@ class BoundedAppServerClient:
                 buffer_unmatched=False,
                 strict_response=True,
                 error_factory=lambda _message: BoundedProtocolError("App Server returned an error response"),
+                rpc_error_factory=BoundedRpcError.from_payload if self.profile.preserve_rpc_errors else None,
                 include_jsonrpc=False,
             )
             if request_id in self._seen_response_ids:
                 raise BoundedProtocolError("duplicate App Server response id")
             self._seen_response_ids.add(request_id)
             return BoundedRequestResult(result, tuple(notifications))
+        except BoundedRpcError:
+            self._seen_response_ids.add(request_id)
+            raise
         except asyncio.CancelledError:
             await self._close_after_cancellation()
             raise

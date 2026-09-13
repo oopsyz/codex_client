@@ -328,3 +328,15 @@ missing cert), `3` cannot bind, `130` SIGINT.
 Two lower-exposure alternatives worth preferring when they fit: bind the gateway to
 `127.0.0.1` and reach it over an SSH tunnel or WireGuard/Tailscale, or terminate TLS at
 a reverse proxy and keep the gateway on loopback behind it.
+
+
+### Opt-in bounded RPC error observations
+
+`BoundedClientProfile(preserve_rpc_errors=True)` exposes valid correlated server
+errors as `BoundedRpcError` with exact `rpc_response`, method, code, message and
+data. The connection stays open for caller-decided reads; the client never retries.
+Default behavior remains generic error plus close. Malformed envelopes, protocol
+errors, deadlines and frame/aggregate-byte/notification limits still fail closed.
+An observed error consumes its request ID; use a fresh ID for each later request.
+Callers must retain diagnostic data privately and explicitly classify any bounded
+read retry. This seam does not authorize replay of task or turn creation.
