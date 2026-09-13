@@ -25,6 +25,7 @@ from codex_ws_client import (  # noqa: E402
     BoundedAppServerClient,
     BoundedClientProfile,
     BoundedProtocolError,
+    BoundedRpcError,
     BoundedRequestResult,
     default_server_request_handler,
     EXIT_SUCCESS,
@@ -216,6 +217,47 @@ class BoundedAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(BoundedProtocolError, "error response"):
             await client.request("initialize", {}, request_id=17)
         self.assertEqual(len(ws.sent), 1)
+
+    async def test_opt_in_rpc_error_retains_payload_and_connection_without_retry(self):
+        error = {"code": -32600, "message": "not materialized", "data": {"detail": "exact"}}
+        ws = MockWebSocket([{"id": "read-1", "error": error}, {"id": "read-2", "result": {"ok": True}}])
+        client = BoundedAppServerClient(self._profile(preserve_rpc_errors=True), ws)
+        with self.assertRaises(BoundedRpcError) as caught:
+            await client.request("thread/read", {}, request_id="read-1")
+        self.assertEqual(caught.exception.rpc_response, {"id": "read-1", "error": error})
+        self.assertEqual(caught.exception.method, "thread/read")
+        self.assertFalse(ws.closed)
+        self.assertEqual(len(ws.sent), 1)
+        self.assertTrue((await client.request("thread/read", {}, request_id="read-2")).result["ok"])
+        await client.close()
+
+    async def test_opt_in_error_id_cannot_be_reused(self):
+        ws = MockWebSocket([{"id": 1, "error": {"code": -32600, "message": "exact"}}])
+        client = BoundedAppServerClient(self._profile(preserve_rpc_errors=True), ws)
+        with self.assertRaises(BoundedRpcError):
+            await client.request("thread/read", {}, request_id=1)
+        with self.assertRaisesRegex(BoundedProtocolError, "duplicate"):
+            await client.request("thread/read", {}, request_id=1)
+        self.assertEqual(len(ws.sent), 1)
+        self.assertTrue(ws.closed)
+
+    async def test_opt_in_malformed_error_still_fails_closed(self):
+        for error in ({"code": True, "message": "x"}, {"code": -1}, {"code": -1, "message": "x", "extra": 1}):
+            ws = MockWebSocket([{"id": 1, "error": error}])
+            client = BoundedAppServerClient(self._profile(preserve_rpc_errors=True), ws)
+            with self.assertRaises(BoundedProtocolError):
+                await client.request("thread/read", {}, request_id=1)
+            self.assertTrue(ws.closed)
+
+    async def test_opt_in_preserves_total_byte_budget_across_rpc_errors(self):
+        error = {"id": 1, "error": {"code": -32600, "message": "x" * 120}}
+        ws = MockWebSocket([error, {**error, "id": 2}])
+        client = BoundedAppServerClient(self._profile(preserve_rpc_errors=True, max_frame_bytes=256, max_total_bytes=256), ws)
+        with self.assertRaises(BoundedRpcError):
+            await client.request("thread/read", {}, request_id=1)
+        with self.assertRaises(BoundedProtocolError):
+            await client.request("thread/read", {}, request_id=2)
+        self.assertTrue(ws.closed)
 
     async def test_initialize_sends_source_valid_initialized_and_reuses_attempt_budget(self) -> None:
         ws = MockWebSocket(
