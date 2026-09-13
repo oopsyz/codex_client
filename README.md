@@ -514,3 +514,21 @@ If you hit a bug, open an issue with the command you ran, the expected behavior,
 
 Contributions are welcome. Keep changes focused, update documentation when behavior changes, and include validation steps or reproduction notes in the pull request.
 
+# Finding named tasks with empty previews
+
+For task discovery, use the section-aware search:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --uri ws://127.0.0.1:8766 --search-threads "Engine Architecture 5"
+```
+
+This read-only operation searches every ordinary and section-scoped page and
+deduplicates results by task ID. It works around servers that exclude tasks
+with empty previews from ordinary listing. It does not create, resume or modify
+tasks. `--list-threads` keeps its existing single-page behavior.
+
+Search uses one overall timeout and a 100-page budget. Unsupported section
+listing, repeated cursors and exhausted budgets are errors, not empty results.
+The response reports its coverage: unsectioned tasks with empty previews may
+still be omitted by the server. Results follow discovery order; ordinary-list
+cursors cannot be used with this aggregate search.

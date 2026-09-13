@@ -1146,8 +1146,11 @@ class ProtocolClient:
         ancestor_thread_id: str = "",
         updated_after: str = "",
         updated_before: str = "",
+        section_id: str = "",
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"sortKey": sort_key, "sortDirection": sort_direction, "limit": limit}
+        if section_id:
+            params["sectionId"] = section_id
         if cursor:
             params["cursor"] = cursor
         if cwd:
@@ -1207,6 +1210,60 @@ class ProtocolClient:
                 filtered.append(thread)
             response["data"] = filtered
         return response
+
+    async def search_threads(self, timeout: float | None, **filters: Any) -> dict[str, Any]:
+        """Search ordinary and section-scoped lists, deduplicating actual task IDs.
+
+        Some servers omit empty-preview tasks from ordinary listing. Section
+        queries recover those tasks without changing them. Empty-preview tasks
+        outside any section may still be omitted by the server.
+        """
+        if filters.get("cursor"):
+            raise ValueError("Section-aware search requires an initial search, not a list cursor")
+        filters = {k: v for k, v in filters.items() if k != "cursor"}
+        deadline = None if timeout is None else monotonic() + timeout
+        remaining_pages = 100
+
+        def remaining() -> float | None:
+            if deadline is None:
+                return None
+            value = deadline - monotonic()
+            if value <= 0:
+                raise asyncio.TimeoutError("Task search deadline exceeded")
+            return value
+
+        async def pages(method: str, section_id: str = "") -> list[dict[str, Any]]:
+            nonlocal remaining_pages
+            cursor = ""
+            seen: set[str] = set()
+            rows: list[dict[str, Any]] = []
+            while True:
+                if remaining_pages <= 0:
+                    raise ValueError("Task search page budget exceeded; results are incomplete")
+                remaining_pages -= 1
+                if method == "threadSection/list":
+                    params: dict[str, Any] = {"limit": 100}
+                    if cursor:
+                        params["cursor"] = cursor
+                    page = await self.request(method, params, timeout=remaining())
+                else:
+                    page = await self.list_threads(remaining(), **filters, cursor=cursor, section_id=section_id)
+                rows.extend(page["data"])
+                cursor = page.get("nextCursor")
+                if not cursor:
+                    return rows
+                if cursor in seen:
+                    raise ValueError("Task search repeated a cursor; results are incomplete")
+                seen.add(cursor)
+
+        matches = {row["id"]: row for row in await pages("thread/list")}
+        sections = {row["id"] for row in await pages("threadSection/list")}
+        for section_id in sorted(sections):
+            for row in await pages("thread/list", section_id):
+                matches[row["id"]] = row
+        return {"data": list(matches.values()), "nextCursor": None,
+                "coverage": "ordinary_and_section_scoped",
+                "limitation": "The server may omit unsectioned tasks with empty previews."}
 
     async def list_background_terminals(
         self, thread_id: str, timeout: float | None, *, cursor: str = "", limit: int = 50
@@ -2204,6 +2261,7 @@ async def run_client(args: argparse.Namespace) -> int:
             args.create_project,
             args.import_project,
             args.list_threads,
+            args.search_threads,
             args.list_loaded_threads,
             args.read_thread,
             args.read_turn,
@@ -2306,15 +2364,16 @@ async def run_client(args: argparse.Namespace) -> int:
                 result = await client.import_project(make_project_import_params(args), timeout)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
-            if args.list_threads:
-                result = await client.list_threads(
+            if args.list_threads or args.search_threads:
+                operation = client.search_threads if args.search_threads else client.list_threads
+                result = await operation(
                     timeout,
                     cursor=args.threads_cursor,
                     limit=args.threads_limit,
                     sort_key=args.threads_sort_key,
                     sort_direction=args.threads_sort_direction,
                     cwd=args.filter_cwd,
-                    title=args.filter_title,
+                    title=args.search_threads or args.filter_title,
                     model_providers=args.model_provider,
                     source_kinds=args.source_kind,
                     archived=args.archived,
@@ -2624,6 +2683,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument("--list-threads", action="store_true", help="Call thread/list and print JSON.")
+    parser.add_argument("--search-threads", metavar="NAME", help="Search all ordinary and section-scoped pages by name, deduplicated by task ID.")
     parser.add_argument("--list-loaded-threads", action="store_true", help="Call thread/loaded/list and print runtime-loaded thread IDs.")
     parser.add_argument("--read-thread", default="", metavar="THREAD_ID", help="Call thread/read and print JSON.")
     parser.add_argument(
