@@ -289,7 +289,10 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox read-o
 
 Interactive REPL approval handling automatically selects the app-server
 `on-request` policy. Use `--approval-policy {untrusted,on-request,never}` to
-override it explicitly; non-interactive runs continue to default to `never`.
+override it explicitly. Other new threads default to `never`; ordinary resume
+and turn requests omit an unselected approval policy. Noninteractive clients
+still decline approval requests and grant no additional permissions. Inherited
+server policy is not client authorization to approve requests.
 
 Prompt from file:
 

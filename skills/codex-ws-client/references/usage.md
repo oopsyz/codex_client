@@ -60,23 +60,35 @@ Project creation:
   Server host
 
 Model selection:
-- `--model` overrides the configured model
-- if `--model` is omitted, the client reads project `.codex/config.toml` files first
+- `--model` explicitly overrides the model on thread start/resume and turn start
+- on resume, omitted `--model` and `--effort` are not sent; the client neither
+  resolves a configured default nor reads back a selection to rewrite it
+- for new threads only, if `--model` is omitted, the client reads project `.codex/config.toml` files first
 - user `~/.codex/config.toml` is the fallback if no project model is set
 - if the config does not define a model, the client falls back to its built-in default
+- creation defaults also apply to REPL `/new` and TTL replacements; these still
+  require a creation permission selector (use `--permissions` with resume)
+- `--effort` explicitly overrides turn reasoning; omission leaves server-owned
+  thread reasoning unchanged, subject to the server's persisted-state support
+- see [model preservation evidence](../../../docs/model-preservation.md) for
+  protocol sources, coverage, and the limits of synthetic wire tests
 
 Persisted thread:
 - default creation mode persists threads
 - reuse with `--thread-id`
 - resumed turns use `--resume-timeout`
-- do not pass `--sandbox` or `--permissions`; the existing thread's permission
-  policy cannot change
+- do not pass `--sandbox`; explicit `--permissions` is supported at turn start
+- omitted instructions, personality, and approval policy remain absent on
+  resume; fresh creation retains `Answer concisely.`, `pragmatic`, and `never`
+- explicit instructions (including an empty string) are sent on thread
+  start/resume only; personality and policy also apply at turn start
 - use `--detach` for fire-and-forget turns that will be inspected later with `--read-thread THREAD_ID --include-turns`
 
 Ephemeral thread:
 - use `--ephemeral`
 - cannot be resumed across connections
 - cannot be used with `--detach`
+- cannot be combined with `--thread-id`; resume omits this creation-only field
 
 ## REPL behavior
 
@@ -90,7 +102,13 @@ Interactive approvals:
 - only available with `--repl --interactive-approvals`
 - that combination selects `approvalPolicy: on-request` unless an explicit
   `--approval-policy` is supplied
-- non-interactive commands default to `approvalPolicy: never`
+- other new threads default to `approvalPolicy: never`; ordinary resume and
+  turn requests omit an unselected policy
+- noninteractive clients decline command/file approvals and grant no additional
+  permissions, even when server policy is inherited or explicitly `on-request`
+- `--interactive-approvals` alone outside REPL does not enable prompts or grants
+- detach answers requests only while connected; later requests remain owned by
+  the server and other clients, not automatically approved by this client
 - use `--approval-policy {untrusted,on-request,never}` for an explicit protocol
   selection
 

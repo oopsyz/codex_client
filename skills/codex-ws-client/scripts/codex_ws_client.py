@@ -1525,19 +1525,39 @@ def install_sigint_handler(loop: asyncio.AbstractEventLoop) -> None:
 def make_thread_params(
     args: argparse.Namespace,
     cwd: str | None,
-    developer_instructions: str,
+    developer_instructions: str | None,
     *,
     include_sandbox: bool = True,
     include_project: bool = True,
     exclude_turns: bool = False,
+    creation: bool = True,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "approvalPolicy": effective_approval_policy(args),
-        "model": args.model,
-        "personality": args.personality,
-        "developerInstructions": developer_instructions,
-        "ephemeral": args.ephemeral,
-    }
+    params: dict[str, Any] = {}
+    policy = effective_approval_policy(args, creation=creation)
+    if policy is not None:
+        params["approvalPolicy"] = policy
+    personality = getattr(args, "personality", None)
+    if creation:
+        personality = personality if personality is not None else "pragmatic"
+        developer_instructions = developer_instructions if developer_instructions is not None else "Answer concisely."
+        params["ephemeral"] = args.ephemeral
+    if personality is not None:
+        params["personality"] = personality
+    if developer_instructions is not None:
+        params["developerInstructions"] = developer_instructions
+    model = getattr(args, "model", "")
+    if not model and creation:
+        # Only creation needs a client default. Keep args.model as the caller's
+        # explicit override so later resume/turn requests retain omission.
+        raw_cwd = str(getattr(args, "cwd", "") or "").strip()
+        workspace_dir = (
+            None
+            if os.name == "nt" and raw_cwd.startswith("/")
+            else (Path(raw_cwd).resolve() if raw_cwd else Path.cwd().resolve())
+        )
+        model = resolve_default_model(workspace_dir)
+    if model:
+        params["model"] = model
     if include_sandbox:
         sandbox = getattr(args, "sandbox", None)
         permissions = str(getattr(args, "permissions", "") or "").strip()
@@ -1618,14 +1638,14 @@ def make_project_import_params(args: argparse.Namespace) -> dict[str, Any]:
     return params
 
 
-def effective_approval_policy(args: argparse.Namespace) -> str:
-    """Resolve the wire policy without broadening non-interactive runs."""
+def effective_approval_policy(args: argparse.Namespace, *, creation: bool = True) -> str | None:
+    """Resolve explicit wire policy; client approval decisions remain separate."""
     configured = str(getattr(args, "approval_policy", "") or "").strip()
     if configured:
         return configured
     if getattr(args, "repl", False) and getattr(args, "interactive_approvals", False):
         return "on-request"
-    return "never"
+    return "never" if creation else None
 
 
 def make_json_result(
@@ -1739,9 +1759,15 @@ def turn_metrics(
 def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, prompt: str) -> dict[str, Any]:
     params: dict[str, Any] = {
         "threadId": thread_id,
-        "approvalPolicy": effective_approval_policy(args),
         "input": [{"type": "text", "text": prompt}],
     }
+    policy = effective_approval_policy(args, creation=False)
+    if policy is not None:
+        params["approvalPolicy"] = policy
+    if getattr(args, "personality", None) is not None:
+        params["personality"] = args.personality
+    if getattr(args, "model", ""):
+        params["model"] = args.model
     effort = str(getattr(args, "effort", "") or "").strip()
     if effort:
         params["effort"] = effort
@@ -1945,7 +1971,7 @@ async def ensure_thread(
             force_new = True
             rotation_reason = "resume_ttl_unavailable"
         if force_new:
-            result = await client.start_thread(make_thread_params(args, cwd, args.instructions or "Answer concisely."), timeout)
+            result = await client.start_thread(make_thread_params(args, cwd, args.instructions), timeout)
             thread_id = result["thread"]["id"]
             args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
             args.rotation = {"decision": "fresh_thread", "reason": rotation_reason}
@@ -1955,10 +1981,11 @@ async def ensure_thread(
         params = make_thread_params(
             args,
             cwd,
-            args.instructions or "Answer concisely.",
+            args.instructions,
             include_sandbox=False,
             include_project=False,
             exclude_turns=True,
+            creation=False,
         )
         params["threadId"] = args.thread_id
         result = await client.resume_thread(params, resume_timeout)
@@ -1974,7 +2001,7 @@ async def ensure_thread(
             if idle is not None:
                 args.resume_idle_duration_seconds = idle
         return args.thread_id, True
-    result = await client.start_thread(make_thread_params(args, cwd, args.instructions or "Answer concisely."), timeout)
+    result = await client.start_thread(make_thread_params(args, cwd, args.instructions), timeout)
     thread_id = result["thread"]["id"]
     args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
     if args.print_thread_id:
@@ -2251,13 +2278,6 @@ def resolve_prompt(args: argparse.Namespace) -> str:
 async def run_client(args: argparse.Namespace) -> int:
     global _interactive_approvals_enabled
     raw_cwd = str(getattr(args, "cwd", "") or "").strip()
-    workspace_dir = (
-        None
-        if os.name == "nt" and raw_cwd.startswith("/")
-        else (Path(raw_cwd).resolve() if raw_cwd else Path.cwd().resolve())
-    )
-    if not getattr(args, "model", ""):
-        args.model = resolve_default_model(workspace_dir)
     timeout = args.timeout if args.timeout > 0 else None
     connect_timeout = args.connect_timeout if args.connect_timeout > 0 else None
     resume_timeout = args.resume_timeout if args.resume_timeout > 0 else None
@@ -2340,6 +2360,9 @@ async def run_client(args: argparse.Namespace) -> int:
             return EXIT_BAD_ARGS
     elif args.project_root or args.project_thread or args.project_idempotency_key or args.project_metadata:
         print("Project roots, threads, idempotency keys and metadata require --create-project or --import-project.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+    if args.thread_id and args.ephemeral:
+        print("Cannot use --ephemeral with --thread-id; ephemeral is a creation-only setting.", file=sys.stderr)
         return EXIT_BAD_ARGS
     if args.detach and args.ephemeral:
         print("Cannot use --detach with --ephemeral because detached work must be persisted for later reads.", file=sys.stderr)
@@ -2603,12 +2626,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("prompt", nargs="?", default="")
     parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--cwd", default="", help="Explicit working directory to send; omitted lets app-server choose its default.")
-    parser.add_argument("--model", default="", help="Model to use. If omitted, read ~/.codex/config.toml and fall back to the client default.")
+    parser.add_argument("--model", default="", help="Explicit model override. Omitted preserves a resumed thread; new threads use project/user config or the client default.")
     parser.add_argument(
         "--effort",
         choices=("none", "minimal", "low", "medium", "high", "xhigh", "ultra"),
         default="",
-        help="Reasoning effort for the turn; omitted uses the server/model default.",
+        help="Explicit reasoning effort override; omitted preserves the thread's selection (server/model default for new threads).",
     )
     parser.add_argument(
         "--sandbox",
@@ -2627,8 +2650,8 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Absolute writable workspace root to bind through runtimeWorkspaceRoots; may be repeated.",
     )
-    parser.add_argument("--personality", default="pragmatic")
-    parser.add_argument("--instructions", default="")
+    parser.add_argument("--personality", default=None, help="Explicit personality override; new threads default to pragmatic, resume preserves omission.")
+    parser.add_argument("--instructions", default=None, help="Explicit developer instructions for thread start/resume; new threads default to 'Answer concisely.', resume preserves omission.")
     parser.add_argument("--ephemeral", action="store_true")
     parser.add_argument("--thread-id", default="")
     parser.add_argument(
@@ -2687,8 +2710,9 @@ def parse_args() -> argparse.Namespace:
         choices=APPROVAL_POLICY_CHOICES,
         default="",
         help=(
-            "App-server approval policy. Defaults to on-request for REPL interactive approvals "
-            "and never otherwise."
+            "Explicit app-server approval policy. Interactive REPL selects on-request; "
+            "otherwise new threads default to never and resumed threads preserve omission. "
+            "Noninteractive approval requests are still declined."
         ),
     )
     parser.add_argument("--output-schema", default="")

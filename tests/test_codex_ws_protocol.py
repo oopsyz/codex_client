@@ -1235,7 +1235,7 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             args = parse_args()
         self.assertEqual(effective_approval_policy(args), "never")
         self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "never")
-        self.assertEqual(make_turn_params(args, "thread-1", "C:/repo", "prompt")["approvalPolicy"], "never")
+        self.assertNotIn("approvalPolicy", make_turn_params(args, "thread-1", "C:/repo", "prompt"))
 
     def test_interactive_repl_uses_on_request_approval_policy(self) -> None:
         with mock.patch.object(
