@@ -162,6 +162,10 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --import-project
 - `--delete-thread` permanently removes the server-side thread log and is never routine cleanup.
 - In one-shot mode, stale resumed threads fail fast instead of silently switching context.
 - In REPL mode, `/new` starts a fresh thread.
+- On resume, omitted `--model` and `--effort` remain absent from requests,
+  leaving selection to the existing server session. Explicit flags override
+  the selection. Only new threads (including `/new` and TTL replacements)
+  resolve an omitted model from project/user config or the client default.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.
 - `--approval-policy {untrusted,on-request,never}` explicitly selects the
   app-server policy; the default is `on-request` for interactive REPL approval

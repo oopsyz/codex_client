@@ -1440,14 +1440,27 @@ def make_thread_params(
     include_sandbox: bool = True,
     include_project: bool = True,
     exclude_turns: bool = False,
+    resolve_model_default: bool = True,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "approvalPolicy": effective_approval_policy(args),
-        "model": args.model,
         "personality": args.personality,
         "developerInstructions": developer_instructions,
         "ephemeral": args.ephemeral,
     }
+    model = getattr(args, "model", "")
+    if not model and resolve_model_default:
+        # Only creation needs a client default. Keep args.model as the caller's
+        # explicit override so later resume/turn requests retain omission.
+        raw_cwd = str(getattr(args, "cwd", "") or "").strip()
+        workspace_dir = (
+            None
+            if os.name == "nt" and raw_cwd.startswith("/")
+            else (Path(raw_cwd).resolve() if raw_cwd else Path.cwd().resolve())
+        )
+        model = resolve_default_model(workspace_dir)
+    if model:
+        params["model"] = model
     if include_sandbox:
         sandbox = getattr(args, "sandbox", None)
         permissions = str(getattr(args, "permissions", "") or "").strip()
@@ -1652,6 +1665,8 @@ def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, 
         "approvalPolicy": effective_approval_policy(args),
         "input": [{"type": "text", "text": prompt}],
     }
+    if getattr(args, "model", ""):
+        params["model"] = args.model
     effort = str(getattr(args, "effort", "") or "").strip()
     if effort:
         params["effort"] = effort
@@ -1869,6 +1884,7 @@ async def ensure_thread(
             include_sandbox=False,
             include_project=False,
             exclude_turns=True,
+            resolve_model_default=False,
         )
         params["threadId"] = args.thread_id
         result = await client.resume_thread(params, resume_timeout)
@@ -2161,13 +2177,6 @@ def resolve_prompt(args: argparse.Namespace) -> str:
 async def run_client(args: argparse.Namespace) -> int:
     global _interactive_approvals_enabled
     raw_cwd = str(getattr(args, "cwd", "") or "").strip()
-    workspace_dir = (
-        None
-        if os.name == "nt" and raw_cwd.startswith("/")
-        else (Path(raw_cwd).resolve() if raw_cwd else Path.cwd().resolve())
-    )
-    if not getattr(args, "model", ""):
-        args.model = resolve_default_model(workspace_dir)
     timeout = args.timeout if args.timeout > 0 else None
     connect_timeout = args.connect_timeout if args.connect_timeout > 0 else None
     resume_timeout = args.resume_timeout if args.resume_timeout > 0 else None
@@ -2511,12 +2520,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("prompt", nargs="?", default="")
     parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--cwd", default="", help="Explicit working directory to send; omitted lets app-server choose its default.")
-    parser.add_argument("--model", default="", help="Model to use. If omitted, read ~/.codex/config.toml and fall back to the client default.")
+    parser.add_argument("--model", default="", help="Explicit model override. Omitted preserves a resumed thread; new threads use project/user config or the client default.")
     parser.add_argument(
         "--effort",
         choices=("none", "minimal", "low", "medium", "high", "xhigh", "ultra"),
         default="",
-        help="Reasoning effort for the turn; omitted uses the server/model default.",
+        help="Explicit reasoning effort override; omitted preserves the thread's selection (server/model default for new threads).",
     )
     parser.add_argument(
         "--sandbox",

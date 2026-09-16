@@ -60,10 +60,18 @@ Project creation:
   Server host
 
 Model selection:
-- `--model` overrides the configured model
-- if `--model` is omitted, the client reads project `.codex/config.toml` files first
+- `--model` explicitly overrides the model on thread start/resume and turn start
+- on resume, omitted `--model` and `--effort` are not sent; the client neither
+  resolves a configured default nor reads back a selection to rewrite it
+- for new threads only, if `--model` is omitted, the client reads project `.codex/config.toml` files first
 - user `~/.codex/config.toml` is the fallback if no project model is set
 - if the config does not define a model, the client falls back to its built-in default
+- creation defaults also apply to REPL `/new` and TTL replacements; these still
+  require a creation permission selector (use `--permissions` with resume)
+- `--effort` explicitly overrides turn reasoning; omission leaves server-owned
+  thread reasoning unchanged, subject to the server's persisted-state support
+- see [model preservation evidence](../../../docs/model-preservation.md) for
+  protocol sources, coverage, and the limits of synthetic wire tests
 
 Persisted thread:
 - default creation mode persists threads
