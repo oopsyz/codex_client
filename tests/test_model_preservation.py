@@ -26,7 +26,7 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
         cls.schema_dir = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.schema_dir.cleanup)
         subprocess.run(["cmd", "/c", "codex", "app-server", "generate-json-schema",
-                        "--out", cls.schema_dir.name], check=True, capture_output=True)
+                        "--experimental", "--out", cls.schema_dir.name], check=True, capture_output=True)
         root = Path(cls.schema_dir.name) / "v2"
         cls.schemas = {
             method: json.loads((root / name).read_text(encoding="utf-8"))
@@ -35,8 +35,9 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                                  ("turn/start", "TurnStartParams.json"))
         }
 
-    async def exercise(self, options, prompts=(), idle=0):
+    async def exercise(self, options, prompts=(), idle=0, approvals=False, cwd=True):
         calls, failures = [], []
+        approval_replies = []
 
         async def handle(ws):
             try:
@@ -47,6 +48,7 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                         continue
                     calls.append(request)
                     if method in self.schemas:
+                        self.assertLessEqual(set(request["params"]), set(self.schemas[method]["properties"]))
                         validate(request["params"], self.schemas[method])
                     if method == "initialize":
                         result = {"userAgent": "synthetic-model-test"}
@@ -56,6 +58,21 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                         result = {"thread": {"id": "fresh" if method == "thread/start" else "existing",
                                              "status": {"type": "idle"}}}
                     elif method == "turn/start":
+                        if approvals:
+                            requests = [
+                                ("item/commandExecution/requestApproval", {}, {"decision": "decline"}),
+                                ("item/fileChange/requestApproval", {}, {"decision": "decline"}),
+                                ("item/permissions/requestApproval", {"permissions": {"network": {"enabled": True}}},
+                                 {"permissions": {}, "scope": "turn"}),
+                            ]
+                            for index, (approval_method, params, expected) in enumerate(requests):
+                                req_id = f"approval-{index}"
+                                await ws.send(json.dumps({"jsonrpc": "2.0", "id": req_id,
+                                                          "method": approval_method, "params": params}))
+                                reply = json.loads(await ws.recv())
+                                self.assertEqual(reply["id"], req_id)
+                                self.assertEqual(reply["result"], expected)
+                                approval_replies.append(reply)
                         result = {"turn": {"id": "turn-fixture", "status": "inProgress"}}
                     elif method == "thread/unsubscribe":
                         result = {"status": "unsubscribed"}
@@ -76,7 +93,7 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
             async with serve(handle, "127.0.0.1", 0) as server:
                 uri = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
                 with mock.patch.object(sys, "argv", ["client", "--uri", uri, "--json", "--timeout", "2",
-                                                     "--cwd", temp, *options]):
+                                                     *(["--cwd", temp] if cwd else []), *options]):
                     args = client.parse_args()
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with redirect_stdout(stdout), redirect_stderr(stderr), \
@@ -91,6 +108,8 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                 resolved = resolve.call_count
         if failures:
             raise failures[0]
+        if approvals:
+            self.assertEqual(len(approval_replies), 3)
         return [(c["method"], c["params"]) for c in calls if c["method"] != "initialize"], resolved
 
     async def test_resume_omits_model_and_reasoning_in_all_modes(self):
@@ -101,9 +120,9 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls[0][0], "thread/resume")
                 self.assertTrue(any(method == "turn/start" for method, _ in calls))
                 for _, params in calls:
-                    self.assertNotIn("model", params)
-                    self.assertNotIn("effort", params)
-                    self.assertNotIn("config", params)
+                    for field in ("model", "effort", "config", "personality", "developerInstructions",
+                                  "approvalPolicy", "ephemeral", "runtimeWorkspaceRoots", "permissions"):
+                        self.assertNotIn(field, params)
                 self.assertEqual(resolved, 0)
 
     async def test_explicit_overrides_in_all_modes(self):
@@ -134,9 +153,15 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                                                        ["hello", "/exit"])
                 self.assertEqual(calls[0][0], "thread/start")
                 self.assertEqual(calls[0][1]["model"], "configured-luna")
+                self.assertEqual(calls[0][1]["personality"], "pragmatic")
+                self.assertEqual(calls[0][1]["developerInstructions"], "Answer concisely.")
+                self.assertEqual(calls[0][1]["approvalPolicy"], "never")
+                self.assertFalse(calls[0][1]["ephemeral"])
                 turn = next(params for method, params in calls if method == "turn/start")
                 self.assertNotIn("model", turn)
                 self.assertNotIn("effort", turn)
+                self.assertNotIn("approvalPolicy", turn)
+                self.assertNotIn("personality", turn)
                 self.assertEqual(resolved, 1)
 
     async def test_repl_new_after_resume_uses_creation_default(self):
@@ -146,6 +171,9 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                          ["thread/resume", "thread/start", "turn/start"])
         self.assertNotIn("model", calls[0][1])
         self.assertEqual(calls[1][1]["model"], "configured-luna")
+        self.assertEqual(calls[1][1]["approvalPolicy"], "never")
+        self.assertEqual(calls[1][1]["personality"], "pragmatic")
+        self.assertEqual(calls[1][1]["developerInstructions"], "Answer concisely.")
         self.assertEqual(resolved, 1)
 
     async def test_ttl_only_resolves_default_when_creating(self):
@@ -156,6 +184,9 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls[1][0], expected)
                 if expected == "thread/start":
                     self.assertEqual(calls[1][1]["model"], "configured-luna")
+                    self.assertEqual(calls[1][1]["approvalPolicy"], "never")
+                    self.assertEqual(calls[1][1]["personality"], "pragmatic")
+                    self.assertEqual(calls[1][1]["developerInstructions"], "Answer concisely.")
                     self.assertEqual(resolved, 1)
                 else:
                     self.assertNotIn("model", calls[1][1])
@@ -172,6 +203,80 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                 if method == "turn/start":
                     self.assertEqual(params["effort"], "medium")
             self.assertEqual(resolved, 0)
+
+    async def test_explicit_resume_overrides_and_noninteractive_denials(self):
+        for mode in ([], ["--detach"], ["--repl"]):
+            with self.subTest(mode=mode):
+                calls, _ = await self.exercise(
+                    ["--thread-id", "existing", "--personality", "friendly", "--instructions", "Do the assigned work.",
+                     "--approval-policy", "on-request", *mode, "continue"],
+                    ["continue", "/exit"], approvals=True)
+                resume = calls[0][1]
+                self.assertEqual(resume["developerInstructions"], "Do the assigned work.")
+                for method, params in calls:
+                    if method in ("thread/resume", "turn/start"):
+                        self.assertEqual(params["personality"], "friendly")
+                        self.assertEqual(params["approvalPolicy"], "on-request")
+                        self.assertNotIn("ephemeral", params)
+                    if method == "turn/start":
+                        self.assertNotIn("developerInstructions", params)
+
+    async def test_inherited_policy_never_auto_approves(self):
+        for mode in ([], ["--detach"], ["--repl"], ["--interactive-approvals"],
+                     ["--detach", "--interactive-approvals"]):
+            with self.subTest(mode=mode):
+                calls, _ = await self.exercise(["--thread-id", "existing", *mode, "continue"],
+                                               ["continue", "/exit"], approvals=True, cwd=False)
+                for _, params in calls:
+                    self.assertNotIn("approvalPolicy", params)
+                    self.assertNotIn("cwd", params)
+
+    async def test_interactive_repl_policy_and_explicit_precedence(self):
+        for policy, expected in (([], "on-request"), (["--approval-policy", "never"], "never")):
+            for target in (["--thread-id", "existing"], ["--sandbox", "read-only"]):
+                with self.subTest(policy=policy, target=target):
+                    calls, _ = await self.exercise([*target, "--repl", "--interactive-approvals", *policy],
+                                                   ["continue", "d", "d", "d", "/exit"], approvals=True)
+                    for method, params in calls:
+                        if method in ("thread/resume", "thread/start", "turn/start"):
+                            self.assertEqual(params["approvalPolicy"], expected)
+
+    async def test_explicit_cwd_roots_profile_remain_on_supported_requests(self):
+        calls, _ = await self.exercise(["--thread-id", "existing", "--permissions", "fixture",
+                                       "--runtime-workspace-root", "C:/fixture", "continue"])
+        for method, params in calls:
+            if method in ("thread/resume", "turn/start"):
+                self.assertIn("cwd", params)
+                self.assertEqual(params["runtimeWorkspaceRoots"], ["C:/fixture"])
+                if method == "turn/start":
+                    self.assertEqual(params["permissions"], "fixture")
+                else:
+                    self.assertNotIn("permissions", params)
+
+    async def test_explicit_empty_instructions_are_not_replaced(self):
+        calls, _ = await self.exercise(["--thread-id", "existing", "--instructions", "", "continue"])
+        self.assertEqual(calls[0][1]["developerInstructions"], "")
+
+    async def test_fresh_explicit_settings_and_approval_safety_in_all_modes(self):
+        for mode in ([], ["--detach"], ["--repl"]):
+            with self.subTest(mode=mode):
+                calls, _ = await self.exercise(
+                    ["--sandbox", "read-only", "--personality", "friendly", "--instructions", "Explicit task.",
+                     "--approval-policy", "on-request", *mode, "hello"], ["hello", "/exit"], approvals=True)
+                self.assertEqual(calls[0][1]["developerInstructions"], "Explicit task.")
+                for method, params in calls:
+                    if method in ("thread/start", "turn/start"):
+                        self.assertEqual(params["personality"], "friendly")
+                        self.assertEqual(params["approvalPolicy"], "on-request")
+
+    async def test_ephemeral_is_creation_only(self):
+        calls, _ = await self.exercise(["--sandbox", "read-only", "--ephemeral", "hello"])
+        self.assertTrue(calls[0][1]["ephemeral"])
+        with mock.patch.object(sys, "argv", ["client", "--thread-id", "existing", "--ephemeral", "continue"]):
+            args = client.parse_args()
+        with mock.patch.object(client.websockets, "connect", side_effect=AssertionError("must reject before connect")), \
+             redirect_stderr(io.StringIO()):
+            self.assertEqual(await client.run_client(args), client.EXIT_BAD_ARGS)
 
 
 if __name__ == "__main__":

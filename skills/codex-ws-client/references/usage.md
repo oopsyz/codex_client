@@ -77,14 +77,18 @@ Persisted thread:
 - default creation mode persists threads
 - reuse with `--thread-id`
 - resumed turns use `--resume-timeout`
-- do not pass `--sandbox` or `--permissions`; the existing thread's permission
-  policy cannot change
+- do not pass `--sandbox`; explicit `--permissions` is supported at turn start
+- omitted instructions, personality, and approval policy remain absent on
+  resume; fresh creation retains `Answer concisely.`, `pragmatic`, and `never`
+- explicit instructions (including an empty string) are sent on thread
+  start/resume only; personality and policy also apply at turn start
 - use `--detach` for fire-and-forget turns that will be inspected later with `--read-thread THREAD_ID --include-turns`
 
 Ephemeral thread:
 - use `--ephemeral`
 - cannot be resumed across connections
 - cannot be used with `--detach`
+- cannot be combined with `--thread-id`; resume omits this creation-only field
 
 ## REPL behavior
 
@@ -98,7 +102,13 @@ Interactive approvals:
 - only available with `--repl --interactive-approvals`
 - that combination selects `approvalPolicy: on-request` unless an explicit
   `--approval-policy` is supplied
-- non-interactive commands default to `approvalPolicy: never`
+- other new threads default to `approvalPolicy: never`; ordinary resume and
+  turn requests omit an unselected policy
+- noninteractive clients decline command/file approvals and grant no additional
+  permissions, even when server policy is inherited or explicitly `on-request`
+- `--interactive-approvals` alone outside REPL does not enable prompts or grants
+- detach answers requests only while connected; later requests remain owned by
+  the server and other clients, not automatically approved by this client
 - use `--approval-policy {untrusted,on-request,never}` for an explicit protocol
   selection
 

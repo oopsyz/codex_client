@@ -74,8 +74,9 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox
 ```
 
 `--interactive-approvals` selects the app-server `on-request` approval policy
-unless `--approval-policy` is supplied explicitly. Non-interactive commands keep
-the fail-closed `never` default.
+in REPL unless `--approval-policy` is supplied explicitly. Other new threads
+default to `never`; ordinary resumes omit the policy. Noninteractive approval
+requests are still declined regardless of the inherited server policy.
 
 Resume a persisted thread:
 
@@ -166,10 +167,18 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --import-project
   leaving selection to the existing server session. Explicit flags override
   the selection. Only new threads (including `/new` and TTL replacements)
   resolve an omitted model from project/user config or the client default.
+- Omitted `--instructions`, `--personality`, and `--approval-policy` also remain
+  absent on ordinary resume. New threads retain `Answer concisely.`, `pragmatic`,
+  and `never` defaults. Explicit developer instructions are sent at thread
+  start/resume; explicit personality and policy are also sent at turn start.
+- `--ephemeral` is creation-only and cannot be combined with `--thread-id`;
+  resume never sends the ephemeral field.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.
 - `--approval-policy {untrusted,on-request,never}` explicitly selects the
-  app-server policy; the default is `on-request` for interactive REPL approval
-  handling and `never` otherwise.
+  app-server policy; explicit interactive REPL approval handling selects
+  `on-request` unless overridden. Inheriting server policy neither approves
+  requests nor grants additional permissions. Detach handles requests only
+  while connected; its result is not completion or approval of later requests.
 
 ## Output contract
 

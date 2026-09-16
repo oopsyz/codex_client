@@ -101,3 +101,68 @@ pin updated to the exact installed bytes as part of a separately authorized
 installation; copying the script alone can fail that check. Line-ending
 conversion can affect that hash. No launcher configuration or SHA pin is changed
 by this repair.
+
+## Authorized extension: unsolicited session overrides
+
+Extension subject: `9bc90cfaa406d1899e043af154d5fe5e8f80fa62` plus demonstrated
+unsolicited instructions, personality, approval policy, and ephemeral fields.
+The user explicitly authorized this additional local repair; the convergent
+rule and repeated-root diagnosis safeguard above remain in effect.
+
+Ordinary resume now omits developer instructions, personality, approval policy,
+and ephemeral. Turn start omits unselected personality and policy as well as
+model and effort. Explicit instructions, including an empty string, are sent
+on thread start/resume; explicit personality and policy also reach turn start.
+Fresh creation retains `Answer concisely.`, `pragmatic`, `never`, and
+`ephemeral: false`. `/new` and TTL replacement follow those creation defaults.
+Explicit `--ephemeral` remains supported for new threads and is rejected with
+`--thread-id` before connection. CWD, roots, and named-profile omission and
+explicit routing are retained, including the profile on turn start.
+
+Official documentation was fetched again on 2026-09-16:
+
+- [Start or resume](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread)
+  describes optional configuration overrides and demonstrates explicit personality.
+- [Start a turn](https://learn.chatgpt.com/docs/app-server#start-a-turn) describes
+  per-turn configuration overrides that persist to later turns.
+- [Approvals](https://learn.chatgpt.com/docs/app-server#approvals) distinguishes
+  server approval requests from client decisions, including decline and granting
+  only a subset of requested permissions.
+
+Freshly generated installed CLI 0.154.0 experimental schemas confirm optional
+`approvalPolicy`, `personality`, and `developerInstructions` on resume, but no
+`ephemeral` field. Turn start supports policy/personality but no top-level
+developer instructions. Experimental schemas cover explicit roots/profiles.
+Tests also reject outgoing keys not defined in the relevant schema, since
+schema validation alone can permit unknown keys.
+
+The same clean local source commit recorded above passes optional resume fields
+through `build_thread_config_overrides` without manufacturing these values.
+`load_and_apply_persisted_resume_metadata` restores persisted approval policy
+when no override is present. In turn processing, `has_any_overrides` tests the
+optional fields; core `StepSettings::apply` clones existing settings and changes
+personality/policy only when supplied. This does not establish universal cold
+reload inheritance of developer instructions/personality: configuration loading,
+persisted metadata, and server versions remain relevant. The local source is
+not proven identical to the installed binary. The client guarantee is omission
+of unsolicited overrides, not a reconstruction of server state.
+
+Approval safety remains client-owned and unchanged: noninteractive command/file
+requests receive `decline`; permission requests receive an empty grant with turn
+scope. Explicit policy alone never enables interactive decisions. Only
+`--repl --interactive-approvals` enables prompts and selects `on-request` when
+policy is omitted; an explicit policy wins. Inherited server policy is not an
+approval or authorization to broaden access. Detached clients only answer while
+connected and do not claim to resolve requests arriving after unsubscribe.
+
+Extension validation: the same focused pytest command passed **111 tests**.
+Wire coverage includes omission and explicit choices across one-shot/detach/REPL,
+fresh defaults, explicit fresh choices, TTL and `/new`, omitted and explicit
+CWD/roots/profile, interactive policy precedence, ephemeral rejection, and
+noninteractive command/file/permission denials under inherited and explicit
+server policy. No live task or server mutation was used. The prior REPL
+close-after-turn limitation remains deferred. `git diff --check` passed.
+
+Extension disposition: adopt the demonstrated unsolicited overrides; no
+remaining current-scope finding. VERDICT: STOP after the bounded clean commit;
+no installation, launcher pin change, publication, or live effect is authorized.
