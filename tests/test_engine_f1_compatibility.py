@@ -128,9 +128,17 @@ class EngineF1CompatibilityTests(unittest.IsolatedAsyncioTestCase):
                         resume = module.make_thread_params(args, None, args.instructions, include_sandbox=False,
                                                            include_project=False, creation=False, exclude_turns=True)
                         resume["threadId"] = "synthetic"
-                        turn = module.make_turn_params(args, "synthetic", None, "synthetic only")
-                    self.assertEqual(resume, {"threadId": "synthetic", "excludeTurns": True})
-                    self.assertEqual(set(turn), {"threadId", "input"})
+                        turn = module.make_turn_params(args, "synthetic", None, "synthetic only", resumed=True)
+                    self.assertEqual(
+                        resume,
+                        {
+                            "approvalPolicy": "on-request",
+                            "approvalsReviewer": "auto_review",
+                            "threadId": "synthetic",
+                            "excludeTurns": True,
+                        },
+                    )
+                    self.assertEqual(set(turn), {"threadId", "approvalPolicy", "approvalsReviewer", "input"})
                     await runtime.send(connection, "thread/resume", resume, "resume-omission")
                     await runtime.send(connection, "turn/start", turn, "turn-omission")
         self.assertFalse(failures, failures)

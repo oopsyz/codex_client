@@ -119,10 +119,13 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                                                        ["continue", "/exit"])
                 self.assertEqual(calls[0][0], "thread/resume")
                 self.assertTrue(any(method == "turn/start" for method, _ in calls))
-                for _, params in calls:
+                for method, params in calls:
                     for field in ("model", "effort", "config", "personality", "developerInstructions",
-                                  "approvalPolicy", "ephemeral", "runtimeWorkspaceRoots", "permissions"):
+                                  "ephemeral", "runtimeWorkspaceRoots", "permissions"):
                         self.assertNotIn(field, params)
+                    if method in ("thread/resume", "turn/start"):
+                        self.assertEqual(params["approvalPolicy"], "on-request")
+                        self.assertEqual(params["approvalsReviewer"], "auto_review")
                 self.assertEqual(resolved, 0)
 
     async def test_explicit_overrides_in_all_modes(self):
@@ -217,18 +220,30 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                     if method in ("thread/resume", "turn/start"):
                         self.assertEqual(params["personality"], "friendly")
                         self.assertEqual(params["approvalPolicy"], "on-request")
+                        self.assertNotIn("approvalsReviewer", params)
                         self.assertNotIn("ephemeral", params)
                     if method == "turn/start":
                         self.assertNotIn("developerInstructions", params)
 
-    async def test_inherited_policy_never_auto_approves(self):
+    async def test_omitted_resume_policy_uses_approve_for_me_defaults(self):
         for mode in ([], ["--detach"], ["--repl"], ["--interactive-approvals"],
-                     ["--detach", "--interactive-approvals"]):
+                     ["--detach", "--interactive-approvals"],
+                     ["--repl", "--interactive-approvals"]):
             with self.subTest(mode=mode):
+                prompts = (
+                    ["continue", "d", "d", "d", "/exit"]
+                    if mode == ["--repl", "--interactive-approvals"]
+                    else ["continue", "/exit"]
+                )
                 calls, _ = await self.exercise(["--thread-id", "existing", *mode, "continue"],
-                                               ["continue", "/exit"], approvals=True, cwd=False)
-                for _, params in calls:
-                    self.assertNotIn("approvalPolicy", params)
+                                               prompts, approvals=True, cwd=False)
+                for method, params in calls:
+                    if method in ("thread/resume", "turn/start"):
+                        self.assertEqual(params["approvalPolicy"], "on-request")
+                        if mode == ["--repl", "--interactive-approvals"]:
+                            self.assertNotIn("approvalsReviewer", params)
+                        else:
+                            self.assertEqual(params["approvalsReviewer"], "auto_review")
                     self.assertNotIn("cwd", params)
 
     async def test_interactive_repl_policy_and_explicit_precedence(self):
@@ -240,6 +255,7 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
                     for method, params in calls:
                         if method in ("thread/resume", "thread/start", "turn/start"):
                             self.assertEqual(params["approvalPolicy"], expected)
+                            self.assertNotIn("approvalsReviewer", params)
 
     async def test_explicit_cwd_roots_profile_remain_on_supported_requests(self):
         calls, _ = await self.exercise(["--thread-id", "existing", "--permissions", "fixture",

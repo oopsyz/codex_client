@@ -95,10 +95,11 @@ limitations above are retained explicitly.
 
 ## Installation implications
 
-This commit changes canonical repository sources only. Installed skill copies
-remain unchanged. A launcher that verifies the script SHA-256 must have its
-pin updated to the exact installed bytes as part of a separately authorized
-installation; copying the script alone can fail that check. Line-ending
+The earlier model-preservation commit changed canonical repository sources only.
+For this approval-policy repair, the established profile installation was also
+synchronized after validation; the canonical and profile skill files have exact
+SHA-256 parity. A launcher that verifies the script SHA-256 must still use the
+exact installed bytes; copying the script alone can fail that check. Line-ending
 conversion can affect that hash. No launcher configuration or SHA pin is changed
 by this repair.
 
@@ -109,10 +110,12 @@ unsolicited instructions, personality, approval policy, and ephemeral fields.
 The user explicitly authorized this additional local repair; the convergent
 rule and repeated-root diagnosis safeguard above remain in effect.
 
-Ordinary resume now omits developer instructions, personality, approval policy,
-and ephemeral. Turn start omits unselected personality and policy as well as
-model and effort. Explicit instructions, including an empty string, are sent
-on thread start/resume; explicit personality and policy also reach turn start.
+Ordinary resume still omits developer instructions, personality, and ephemeral.
+When approval policy is omitted, resume and the resumed turn start now send
+`approvalPolicy: on-request` with `approvalsReviewer: auto_review`. Turn start
+continues to omit unselected personality, model, and effort. Explicit
+instructions, including an empty string, are sent on thread start/resume;
+explicit personality and policy also reach turn start.
 Fresh creation retains `Answer concisely.`, `pragmatic`, `never`, and
 `ephemeral: false`. `/new` and TTL replacement follow those creation defaults.
 Explicit `--ephemeral` remains supported for new threads and is rejected with
@@ -147,22 +150,27 @@ persisted metadata, and server versions remain relevant. The local source is
 not proven identical to the installed binary. The client guarantee is omission
 of unsolicited overrides, not a reconstruction of server state.
 
-Approval safety remains client-owned and unchanged: noninteractive command/file
-requests receive `decline`; permission requests receive an empty grant with turn
-scope. Explicit policy alone never enables interactive decisions. Only
+Approval safety remains bounded: on an ordinary noninteractive resume with no
+explicit policy, the client sends `on-request` with `auto_review`, allowing the
+server reviewer to handle eligible approval requests. Requests that still reach
+the client receive `decline`; permission requests receive an empty grant with
+turn scope. Explicit policy alone never enables interactive decisions. Only
 `--repl --interactive-approvals` enables prompts and selects `on-request` when
 policy is omitted; an explicit policy wins. Inherited server policy is not an
 approval or authorization to broaden access. Detached clients only answer while
 connected and do not claim to resolve requests arriving after unsubscribe.
 
-Extension validation: the same focused pytest command passed **111 tests**.
-Wire coverage includes omission and explicit choices across one-shot/detach/REPL,
+Extension validation: the full pytest command passed **153 tests** with three
+Engine F1 tests skipped because `CODEX_F1_ENGINE_ROOT` is not configured. Wire
+coverage includes omission and explicit choices across one-shot/detach/REPL,
 fresh defaults, explicit fresh choices, TTL and `/new`, omitted and explicit
-CWD/roots/profile, interactive policy precedence, ephemeral rejection, and
-noninteractive command/file/permission denials under inherited and explicit
-server policy. No live task or server mutation was used. The prior REPL
-close-after-turn limitation remains deferred. `git diff --check` passed.
+CWD/roots/profile, interactive policy and reviewer precedence, ephemeral
+rejection, and noninteractive command/file/permission denials under inherited
+and explicit server policy. No live task or server mutation was used. The prior
+REPL close-after-turn limitation remains deferred. `git diff --check` passed.
 
-Extension disposition: adopt the demonstrated unsolicited overrides; no
-remaining current-scope finding. VERDICT: STOP after the bounded clean commit;
-no installation, launcher pin change, publication, or live effect is authorized.
+Extension disposition: adopt the demonstrated unsolicited overrides and the
+approve-for-me resume mapping; no remaining current-scope finding is known from
+the local evidence. The authorized profile mirror was synchronized with exact
+SHA-256 parity. VERDICT: STOP after the bounded clean change; no publication or
+live effect is authorized.

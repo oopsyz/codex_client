@@ -1536,6 +1536,9 @@ def make_thread_params(
     policy = effective_approval_policy(args, creation=creation)
     if policy is not None:
         params["approvalPolicy"] = policy
+    reviewer = effective_approvals_reviewer(args, resumed=not creation)
+    if reviewer is not None:
+        params["approvalsReviewer"] = reviewer
     personality = getattr(args, "personality", None)
     if creation:
         personality = personality if personality is not None else "pragmatic"
@@ -1639,13 +1642,34 @@ def make_project_import_params(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def effective_approval_policy(args: argparse.Namespace, *, creation: bool = True) -> str | None:
-    """Resolve explicit wire policy; client approval decisions remain separate."""
+    """Resolve the wire approval policy for creation and persisted-thread resume."""
     configured = str(getattr(args, "approval_policy", "") or "").strip()
     if configured:
         return configured
     if getattr(args, "repl", False) and getattr(args, "interactive_approvals", False):
         return "on-request"
-    return "never" if creation else None
+    return "never" if creation else "on-request"
+
+
+def effective_approvals_reviewer(args: argparse.Namespace, *, resumed: bool = False) -> str | None:
+    """Route the omitted resume policy to the app-server's approve-for-me reviewer."""
+    if not resumed:
+        return None
+    if str(getattr(args, "approval_policy", "") or "").strip():
+        return None
+    if getattr(args, "repl", False) and getattr(args, "interactive_approvals", False):
+        return None
+    return "auto_review"
+
+
+def effective_turn_approval_policy(args: argparse.Namespace, *, resumed: bool = False) -> str | None:
+    """Resolve turn policy without applying the resume default to fresh turns."""
+    configured = str(getattr(args, "approval_policy", "") or "").strip()
+    if configured:
+        return configured
+    if getattr(args, "repl", False) and getattr(args, "interactive_approvals", False):
+        return "on-request"
+    return "on-request" if resumed else None
 
 
 def make_json_result(
@@ -1756,14 +1780,24 @@ def turn_metrics(
     return metrics
 
 
-def make_turn_params(args: argparse.Namespace, thread_id: str, cwd: str | None, prompt: str) -> dict[str, Any]:
+def make_turn_params(
+    args: argparse.Namespace,
+    thread_id: str,
+    cwd: str | None,
+    prompt: str,
+    *,
+    resumed: bool = False,
+) -> dict[str, Any]:
     params: dict[str, Any] = {
         "threadId": thread_id,
         "input": [{"type": "text", "text": prompt}],
     }
-    policy = effective_approval_policy(args, creation=False)
+    policy = effective_turn_approval_policy(args, resumed=resumed)
     if policy is not None:
         params["approvalPolicy"] = policy
+    reviewer = effective_approvals_reviewer(args, resumed=resumed)
+    if reviewer is not None:
+        params["approvalsReviewer"] = reviewer
     if getattr(args, "personality", None) is not None:
         params["personality"] = args.personality
     if getattr(args, "model", ""):
@@ -1974,6 +2008,7 @@ async def ensure_thread(
             result = await client.start_thread(make_thread_params(args, cwd, args.instructions), timeout)
             thread_id = result["thread"]["id"]
             args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
+            args._resumed = False
             args.rotation = {"decision": "fresh_thread", "reason": rotation_reason}
             if args.print_thread_id:
                 print(f"THREAD_ID={thread_id}", file=sys.stderr)
@@ -1994,6 +2029,7 @@ async def ensure_thread(
         if status_type in {"systemError", "notLoaded"}:
             raise RpcError(-32000, f"thread/resume returned unusable status: {status_type}", method="thread/resume")
         args.effective_sandbox = thread_sandbox(result)
+        args._resumed = True
         args.rotation = {"decision": "resume", "reason": "within_resume_ttl"} if resume_ttl > 0 else {"decision": "resume"}
         resumed_thread = result.get("thread")
         if isinstance(resumed_thread, Mapping) and not hasattr(args, "resume_idle_duration_seconds"):
@@ -2004,6 +2040,7 @@ async def ensure_thread(
     result = await client.start_thread(make_thread_params(args, cwd, args.instructions), timeout)
     thread_id = result["thread"]["id"]
     args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
+    args._resumed = False
     if args.print_thread_id:
         print(f"THREAD_ID={thread_id}", file=sys.stderr)
     return thread_id, False
@@ -2037,7 +2074,12 @@ async def run_turn(
             await result
 
     try:
-        turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout, deadline=deadline)
+        turn = await client.request(
+            "turn/start",
+            make_turn_params(args, thread_id, cwd, prompt, resumed=bool(getattr(args, "_resumed", False))),
+            timeout=timeout,
+            deadline=deadline,
+        )
         turn_id = turn["turn"]["id"]
         started_turn = turn.get("turn", {})
         if isinstance(started_turn, Mapping):
@@ -2198,7 +2240,11 @@ async def run_detached_turn(
         if inspect.isawaitable(result):
             await result
 
-    turn = await client.request("turn/start", make_turn_params(args, thread_id, cwd, prompt), timeout=timeout)
+    turn = await client.request(
+        "turn/start",
+        make_turn_params(args, thread_id, cwd, prompt, resumed=bool(getattr(args, "_resumed", False))),
+        timeout=timeout,
+    )
     turn_data = turn["turn"]
     turn_id = turn_data["id"]
     turn_status = turn_data.get("status", "unknown")
@@ -2711,7 +2757,8 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Explicit app-server approval policy. Interactive REPL selects on-request; "
-            "otherwise new threads default to never and resumed threads preserve omission. "
+            "otherwise new threads default to never and ordinary resumes default to "
+            "on-request with auto_review when omitted. "
             "Noninteractive approval requests are still declined."
         ),
     )

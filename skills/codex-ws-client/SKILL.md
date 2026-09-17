@@ -75,8 +75,10 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox
 
 `--interactive-approvals` selects the app-server `on-request` approval policy
 in REPL unless `--approval-policy` is supplied explicitly. Other new threads
-default to `never`; ordinary resumes omit the policy. Noninteractive approval
-requests are still declined regardless of the inherited server policy.
+default to `never`; an ordinary resume defaults to `on-request` with the
+`auto_review` approvals reviewer (the approve-for-me behavior). Noninteractive
+approval requests that reach the client are still declined regardless of the
+inherited server policy.
 
 Resume a persisted thread:
 
@@ -167,10 +169,12 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --import-project
   leaving selection to the existing server session. Explicit flags override
   the selection. Only new threads (including `/new` and TTL replacements)
   resolve an omitted model from project/user config or the client default.
-- Omitted `--instructions`, `--personality`, and `--approval-policy` also remain
-  absent on ordinary resume. New threads retain `Answer concisely.`, `pragmatic`,
-  and `never` defaults. Explicit developer instructions are sent at thread
-  start/resume; explicit personality and policy are also sent at turn start.
+- Omitted `--instructions` and `--personality` remain absent on ordinary resume.
+  An omitted `--approval-policy` on ordinary resume resolves to `on-request`
+  with `approvalsReviewer: auto_review`; new threads retain `Answer concisely.`,
+  `pragmatic`, and `never` defaults. Explicit developer instructions are sent
+  at thread start/resume; explicit personality and policy are also sent at turn
+  start.
 - `--ephemeral` is creation-only and cannot be combined with `--thread-id`;
   resume never sends the ephemeral field.
 - Approval requests are auto-declined unless `--interactive-approvals` is used in REPL mode.
