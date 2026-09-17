@@ -123,6 +123,9 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PRO
 - 恢复线程后的轮次会使用 `--resume-timeout`
 - 创建新提示线程时必须且只能选择一种权限策略：显式指定 `--sandbox read-only`、`--sandbox workspace-write`、`--sandbox danger-full-access`，或指定命名配置 `--permissions PROFILE_ID`
 - `--sandbox` 与 `--permissions` 不能同时使用；恢复已有线程时两者都不能传入，如需更改权限策略，请创建新线程
+- 恢复持久线程且未显式指定 `--approval-policy` 时，`thread/resume` 和
+  `turn/start` 会使用 `approvalPolicy: on-request` 与
+  `approvalsReviewer: auto_review`；沙箱选择仍保持独立
 
 持久化：
 
@@ -255,6 +258,9 @@ REPL 模式下可用：
 - 命令审批默认自动拒绝
 - 文件变更审批默认自动拒绝
 - 权限请求默认拒绝
+
+对于普通的非交互式恢复线程，服务端会对符合条件的审批请求使用
+`auto_review`；如果审批请求仍发送到客户端，非交互式客户端仍会拒绝它。
 
 REPL 覆盖行为：
 

@@ -1236,6 +1236,12 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(effective_approval_policy(args), "never")
         self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "never")
         self.assertNotIn("approvalPolicy", make_turn_params(args, "thread-1", "C:/repo", "prompt"))
+        resume = make_thread_params(args, "C:/repo", "dev", creation=False)
+        self.assertEqual(resume["approvalPolicy"], "on-request")
+        self.assertEqual(resume["approvalsReviewer"], "auto_review")
+        turn = make_turn_params(args, "thread-1", "C:/repo", "prompt", resumed=True)
+        self.assertEqual(turn["approvalPolicy"], "on-request")
+        self.assertEqual(turn["approvalsReviewer"], "auto_review")
 
     def test_interactive_repl_uses_on_request_approval_policy(self) -> None:
         with mock.patch.object(
@@ -1247,6 +1253,8 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(effective_approval_policy(args), "on-request")
         self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "on-request")
         self.assertEqual(make_turn_params(args, "thread-1", "C:/repo", "prompt")["approvalPolicy"], "on-request")
+        self.assertNotIn("approvalsReviewer", make_thread_params(args, "C:/repo", "dev", creation=False))
+        self.assertNotIn("approvalsReviewer", make_turn_params(args, "thread-1", "C:/repo", "prompt", resumed=True))
 
     def test_explicit_approval_policy_overrides_mode_default(self) -> None:
         with mock.patch.object(
