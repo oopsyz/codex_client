@@ -76,9 +76,11 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox
 `--interactive-approvals` selects the app-server `on-request` approval policy
 in REPL unless `--approval-policy` is supplied explicitly. Other new threads
 default to `never`; an ordinary resume defaults to `on-request` with the
-`auto_review` approvals reviewer (the approve-for-me behavior). Noninteractive
-approval requests that reach the client are still declined regardless of the
-inherited server policy.
+`auto_review` approvals reviewer (the explicit approve-for-me automatic-review
+default). This is not a preserve-existing-approval-configuration mode: the
+client does not inspect and replay the thread's server-owned policy/reviewer
+before resuming. Noninteractive approval requests that reach the client are
+still declined regardless of the inherited server policy.
 
 Resume a persisted thread:
 
@@ -192,6 +194,8 @@ With `--json`, expect:
 - `status`
 - effective `sandbox`
 - `text`
+- optional `commentary` and normalized `messages` when message phases are
+  available
 - optional `error`
 - optional `notifications`
 - optional `metrics`
@@ -212,6 +216,9 @@ The client reads usage from `thread/tokenUsage/updated` and model reroutes from
 `model/rerouted`. Use `--resume-ttl SECONDS` to make persisted-thread resume
 TTL-aware; an idle thread beyond the TTL is replaced with a fresh thread. The
 default `0` preserves unconditional resume while collecting baseline metrics.
+Timeouts and transport failures report `status: "unknown"`, the current phase,
+and any known thread/turn identifiers in JSON mode; reconcile the persisted
+turn before retrying.
 
 ## When to load more detail
 

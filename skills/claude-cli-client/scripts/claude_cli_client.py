@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import queue
 import shutil
@@ -17,6 +18,7 @@ DEFAULT_CLAUDE_BIN = "claude"
 DEFAULT_MODEL = ""
 DEFAULT_PERMISSION_MODE = "default"
 DEFAULT_RESUME_TIMEOUT = 300.0
+PROCESS_CLEANUP_TIMEOUT = 1.0
 BOM = "\ufeff"
 
 PERMISSION_MODES = (
@@ -114,7 +116,10 @@ def append_repeatable_args(command: list[str], flag: str, values: list[str]) -> 
 def resolve_claude_bin(raw_value: str) -> str:
     candidates = [raw_value]
     if sys.platform.startswith("win") and raw_value == DEFAULT_CLAUDE_BIN:
-        candidates = ["claude.cmd", "claude.exe", raw_value]
+        # Prefer a native executable.  A .cmd fallback remains supported, but
+        # Windows may route batch files through shell parsing even with a list
+        # argv and shell=False.
+        candidates = ["claude.exe", "claude.cmd", raw_value]
     for candidate in candidates:
         resolved = shutil.which(candidate)
         if resolved:
@@ -181,7 +186,7 @@ def build_claude_command(
         command.append("--exclude-dynamic-system-prompt-sections")
     if args.bare:
         command.append("--bare")
-    if args.tools:
+    if args.tools is not None:
         command.extend(["--tools", args.tools])
     append_repeatable_args(command, "--betas", args.betas)
     append_repeatable_args(command, "--add-dir", args.add_dir)
@@ -271,19 +276,126 @@ def maybe_handle_permission_denial(
             print(f"[permissions] denials={len(denials)}", file=sys.stderr)
 
 
-def start_stream_reader(stream: Any) -> tuple[queue.Queue[str | None], threading.Thread]:
-    lines: queue.Queue[str | None] = queue.Queue()
+def start_stream_reader(
+    stream: Any, *, tail: deque[str] | None = None
+) -> tuple[queue.Queue[str | None] | None, threading.Thread]:
+    lines: queue.Queue[str | None] | None = None if tail is not None else queue.Queue()
 
     def _reader() -> None:
         try:
             for line in iter(stream.readline, ""):
-                lines.put(line)
+                if tail is not None:
+                    # Keep diagnostics bounded while continuing to drain the
+                    # OS pipe so a noisy child cannot deadlock.
+                    tail.append(line[:4096])
+                else:
+                    assert lines is not None
+                    lines.put(line)
+        except Exception:
+            # Closing a pipe during child cleanup is expected.
+            pass
         finally:
-            lines.put(None)
+            if lines is not None:
+                lines.put(None)
 
     thread = threading.Thread(target=_reader, daemon=True)
     thread.start()
     return lines, thread
+
+
+def _capture_stream_owners(process: Any) -> tuple[Any | None, ...]:
+    owners: list[Any | None] = []
+    for stream_name in ("stdout", "stderr", "stdin"):
+        stream = getattr(process, stream_name, None)
+        if stream is None:
+            owners.append(None)
+            continue
+        try:
+            buffered = getattr(stream, "buffer", None)
+            raw = getattr(buffered, "raw", None)
+        except Exception:
+            raw = None
+        owner = raw if raw is not None else stream
+        owners.append(owner if callable(getattr(owner, "close", None)) else None)
+    return tuple(owners)
+
+
+def close_process_streams(stream_owners: tuple[Any | None, ...]) -> None:
+    """Close each captured stream owner exactly once.
+
+    The raw owner, rather than a bare numeric descriptor or its outer text
+    wrapper, is the sole cleanup owner. That keeps a delayed close tied to the
+    original Python file object instead of allowing it to close a descriptor
+    that the process has already recycled for another file.
+    """
+    closed: set[int] = set()
+    for owner in stream_owners:
+        if owner is None or id(owner) in closed:
+            continue
+        closed.add(id(owner))
+        close = getattr(owner, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _remaining_cleanup(deadline: float) -> float:
+    return max(0.0, deadline - perf_counter())
+
+
+def terminate_process(
+    process: Any,
+    *,
+    reader_threads: tuple[threading.Thread | None, ...] = (),
+    stream_owners: tuple[Any | None, ...] | None = None,
+    timeout: float = PROCESS_CLEANUP_TIMEOUT,
+) -> None:
+    """Bound immediate-child cleanup without waiting on inherited descendants.
+
+    The wrapper owns and terminates only the immediate Claude child. Descendants
+    are not recursively killed because their ownership is not known here. The
+    captured owning stream objects are closed in one bounded helper so a
+    platform that blocks pipe cleanup while a descendant holds a writer cannot
+    block the caller. The outer text wrappers are not closed through a second
+    path; all joins and owner cleanup share one cleanup deadline.
+    """
+    deadline = perf_counter() + max(0.0, timeout)
+    owners = stream_owners if stream_owners is not None else _capture_stream_owners(process)
+    owner_closer = threading.Thread(
+        target=close_process_streams,
+        args=(owners,),
+        daemon=True,
+    )
+    owner_closer.start()
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        remaining = _remaining_cleanup(deadline)
+        if remaining > 0:
+            process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            remaining = _remaining_cleanup(deadline)
+            if remaining > 0:
+                process.wait(timeout=remaining)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    except (OSError, ProcessLookupError):
+        pass
+    finally:
+        for thread in reader_threads:
+            if thread is not None:
+                thread.join(timeout=_remaining_cleanup(deadline))
+        owner_closer.join(timeout=_remaining_cleanup(deadline))
 
 
 def run_turn(
@@ -316,6 +428,7 @@ def run_turn(
     except OSError as exc:
         print(f"Failed to start Claude CLI: {exc}", file=sys.stderr)
         return EXIT_CONNECTION_FAILURE, None, session_id
+    stream_owners = _capture_stream_owners(process)
 
     partials: list[str] = []
     final_text = ""
@@ -323,28 +436,43 @@ def run_turn(
     turn_id = ""
     session_seen = session_id
     assistant_message_id = ""
+    final_received = False
     notifications: dict[str, Any] = {
         "permission_denials": [],
         "rate_limit_events": [],
         "system": [],
     }
 
+    stderr_tail: deque[str] = deque(maxlen=200)
+    stdout_thread: threading.Thread | None = None
+    stderr_thread: threading.Thread | None = None
+
+    def cleanup_after_failure() -> None:
+        terminate_process(
+            process,
+            reader_threads=(stdout_thread, stderr_thread),
+            stream_owners=stream_owners,
+        )
+
     try:
         assert process.stdout is not None
-        stdout_queue, _stdout_thread = start_stream_reader(process.stdout)
+        stdout_queue, stdout_thread = start_stream_reader(process.stdout)
+        assert stdout_queue is not None
+        if process.stderr is not None:
+            _, stderr_thread = start_stream_reader(process.stderr, tail=stderr_tail)
         while True:
             remaining: float | None = None
             if timeout is not None:
                 remaining = timeout - (perf_counter() - turn_start_time)
                 if remaining <= 0:
-                    process.kill()
+                    cleanup_after_failure()
                     print(f"Timed out waiting for Claude CLI output (timeout={timeout}s).", file=sys.stderr)
                     return EXIT_TIMEOUT, None, session_seen
 
             try:
                 line = stdout_queue.get(timeout=remaining)
             except queue.Empty:
-                process.kill()
+                cleanup_after_failure()
                 print(f"Timed out waiting for Claude CLI output (timeout={timeout}s).", file=sys.stderr)
                 return EXIT_TIMEOUT, None, session_seen
 
@@ -359,7 +487,7 @@ def run_turn(
             try:
                 event = json.loads(line)
             except json.JSONDecodeError as exc:
-                process.kill()
+                cleanup_after_failure()
                 print(f"Failed to parse Claude stream-json line: {exc}", file=sys.stderr)
                 return EXIT_PARSE_ERROR, None, session_seen
 
@@ -383,6 +511,7 @@ def run_turn(
                 message = event.get("message", {})
                 assistant_message_id = message.get("id", assistant_message_id)
                 final_text = extract_assistant_text(message)
+                final_received = True
             elif event_type == "rate_limit_event":
                 notifications["rate_limit_events"].append(event.get("rate_limit_info", {}))
             elif event_type == "result":
@@ -411,15 +540,24 @@ def run_turn(
                         if context_management is not None:
                             result_payload["context_management"] = context_management
 
-        stderr_text = ""
-        if process.stderr is not None:
-            stderr_text = process.stderr.read()
-            if stderr_text:
-                write_ndjson("stderr", stderr_text)
-                if verbosity >= 1:
-                    print(stderr_text, file=sys.stderr, end="" if stderr_text.endswith("\n") else "\n")
-
-        return_code = process.wait()
+        remaining = None if timeout is None else timeout - (perf_counter() - turn_start_time)
+        if remaining is not None and remaining <= 0:
+            cleanup_after_failure()
+            print(f"Timed out waiting for Claude CLI output (timeout={timeout}s).", file=sys.stderr)
+            return EXIT_TIMEOUT, None, session_seen
+        try:
+            return_code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            cleanup_after_failure()
+            print(f"Timed out waiting for Claude CLI output (timeout={timeout}s).", file=sys.stderr)
+            return EXIT_TIMEOUT, None, session_seen
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=1.0)
+        stderr_text = "".join(stderr_tail)
+        if stderr_text:
+            write_ndjson("stderr", stderr_text)
+            if verbosity >= 1:
+                print(stderr_text, file=sys.stderr, end="" if stderr_text.endswith("\n") else "\n")
         if return_code != 0:
             message = stderr_text.strip() or "Claude CLI exited with a non-zero status."
             print(message, file=sys.stderr)
@@ -439,11 +577,15 @@ def run_turn(
                 )
             return EXIT_TURN_FAILURE, None, session_seen
     except KeyboardInterrupt:
-        process.kill()
+        cleanup_after_failure()
         print("\nInterrupted.", file=sys.stderr)
         return EXIT_SIGINT, None, session_seen
 
-    completed_text = "".join(partials).strip() or final_text or (result_payload or {}).get("result", "")
+    completed_text = (
+        final_text
+        if final_received
+        else "".join(partials).strip() or (result_payload or {}).get("result", "")
+    )
     if not turn_id:
         turn_id = assistant_message_id or str(uuid.uuid4())
 
@@ -698,7 +840,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-hook-events", action="store_true", help="Include hook lifecycle events in the stream-json output.")
     parser.add_argument("--exclude-dynamic-system-prompt-sections", action="store_true", help="Move per-machine system prompt sections into the first user message to improve prompt-cache reuse.")
     parser.add_argument("--bare", action="store_true", help="Minimal mode: skip hooks, LSP, plugin sync, auto-memory, and CLAUDE.md auto-discovery.")
-    parser.add_argument("--tools", default="", help='Built-in tool set for the session, e.g. "Bash,Edit,Read". Use "" for none and "default" for all.')
+    parser.add_argument("--tools", default=None, help='Built-in tool set for the session, e.g. "Bash,Edit,Read". Use "" for none and "default" for all.')
     parser.add_argument("--betas", action="append", default=[], help="Repeatable beta header to include in API requests (API key users only).")
     parser.add_argument("--plugin-url", action="append", default=[], help="Repeatable plugin .zip URL to load for this session only.")
     parser.add_argument("--add-dir", action="append", default=[], help="Repeatable additional directory to allow Claude tool access to.")
@@ -727,6 +869,14 @@ def main() -> int:
 
     if args.detach and args.repl:
         print("Cannot use --detach with --repl.", file=sys.stderr)
+        return EXIT_BAD_ARGS
+
+    if args.detach and (args.continue_session or args.fork_session):
+        print(
+            "Cannot use --detach with --continue or --fork-session because the resulting "
+            "session ID cannot be established before the client exits.",
+            file=sys.stderr,
+        )
         return EXIT_BAD_ARGS
 
     if args.detach and args.no_session_persistence:

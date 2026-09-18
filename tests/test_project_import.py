@@ -155,9 +155,12 @@ class ProjectImportEndToEndTests(unittest.IsolatedAsyncioTestCase):
     async def test_import_unknown_connection_outcome_is_not_retried(self):
         results, _ = await self.exercise("disconnect")
         code, stdout, stderr = results[0]
-        self.assertEqual(code, client.EXIT_PARSE_ERROR)  # existing receive_json contract
-        self.assertEqual(stdout, "")
-        self.assertIn("transport closed", stderr.lower())
+        self.assertEqual(code, client.EXIT_CONNECTION_FAILURE)
+        failure = json.loads(stdout)
+        self.assertEqual(failure["status"], "unknown")
+        self.assertEqual(failure["error"]["kind"], "transport_closed")
+        self.assertIn("WebSocket connection lost", failure["error"]["message"])
+        self.assertEqual(stderr, "")
 
     async def test_invalid_or_ambiguous_inputs_fail_before_connect(self):
         changes = [

@@ -189,9 +189,11 @@ Resumed thread:
 
 - if `--thread-id` is provided, the client calls `thread/resume`
 - resumed turns use `--resume-timeout`
-- neither `--sandbox` nor `--permissions` can be used with `--thread-id`; the
-  existing thread's policy cannot change, so start a fresh thread to choose a
-  permission policy
+- `--sandbox` cannot be used with `--thread-id`; a named `--permissions`
+  profile is allowed on `turn/start` when a resumed turn needs an explicit
+  runtime profile, but it is not sent to `thread/resume`
+- the existing thread's persisted policy is not changed by the named turn
+  profile; start a fresh thread when the thread-level policy itself must change
 
 Persistence:
 
@@ -230,6 +232,8 @@ Current JSON shape includes:
 - `turn_id`
 - `status`
 - `text`
+- optional `commentary` and normalized `messages` when the server exposes
+  message phases
 - effective `sandbox`
 - optional `error`
 - optional `notifications`
@@ -254,6 +258,11 @@ versions remain compatible. When continuing a persisted thread, pass
 `--resume-ttl SECONDS` to start a fresh thread after the persisted thread has
 been idle longer than the TTL. The default `0` keeps the existing unconditional
 resume behavior, allowing cache/rotation measurements to be gathered first.
+
+Timeouts and transport failures in `--json` mode return a failure envelope with
+`status: "unknown"`, the current `phase`, and any known `thread_id`/`turn_id`.
+An unknown outcome means completion was not observed; callers should reconcile
+the persisted turn before retrying.
 
 ## Useful Commands
 
@@ -294,7 +303,11 @@ resume with no explicit policy sends `approvalPolicy: on-request` and
 `approvalsReviewer: auto_review` on both resume and turn start. Fresh-thread
 turns omit an unselected policy. Noninteractive client approval requests are
 still declined; the server-side auto-reviewer handles only eligible requests.
-Inherited server policy is not client authorization to approve requests.
+This ordinary-resume behavior means “apply the client’s approve-for-me
+automatic-review default”; it is not a claim to preserve whatever approval
+configuration the existing thread already had. The client does not inspect
+and replay that server-owned configuration before resuming. Inherited server
+policy is not client authorization to approve requests.
 
 Prompt from file:
 
@@ -356,10 +369,10 @@ Read one persisted turn in normalized form:
 python skills/codex-ws-client/scripts/codex_ws_client.py --read-turn THREAD_ID TURN_ID
 ```
 
-`--read-turn` returns the turn status, concatenated `agentMessage` text, the
-raw turn object, and any server error. If the turn is not present, it returns
-`status: "not_found"`. This is a transport/read result; callers decide what
-the returned text means for their workflow.
+`--read-turn` returns the turn status, selected final-answer text, optional
+commentary/messages, the raw turn object, and any server error. If the turn is
+not present, it returns `status: "not_found"`. This is a transport/read
+result; callers decide what the returned text means for their workflow.
 
 Correct an active turn without interrupting it or starting a different turn:
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import hashlib
 import json
@@ -29,9 +29,12 @@ from codex_ws_client import (  # noqa: E402
     BoundedRequestResult,
     default_server_request_handler,
     EXIT_SUCCESS,
+    EXIT_CONNECTION_FAILURE,
+    EXIT_TIMEOUT,
     EXIT_SIGINT,
     _cancel,
     ProtocolClient,
+    ProtocolTransportError,
     NotificationObservation,
     RetryConfig,
     RpcError,
@@ -46,6 +49,7 @@ from codex_ws_client import (  # noqa: E402
     make_thread_params,
     make_project_create_params,
     make_project_import_params,
+    make_failure_result,
     run_detached_turn,
     run_thread_unload,
     run_turn,
@@ -61,6 +65,7 @@ from codex_ws_client import (  # noqa: E402
     parse_headers,
     turn_metrics,
 )
+import codex_ws_client as client_module  # noqa: E402
 
 # Pinned from npm @openai/codex 0.154.0 (Windows x64), 2026-09-12.
 # generate-json-schema without --experimental; hashes normalize parsed JSON.
@@ -116,9 +121,13 @@ class MockWebSocket:
         self.close_calls = 0
 
     async def send(self, raw: str) -> None:
+        if self.closed:
+            raise ConnectionError("send on closed websocket")
         self.sent.append(json.loads(raw))
 
     async def recv(self) -> str:
+        if self.closed:
+            raise ConnectionError("recv on closed websocket")
         item = await self.messages.get()
         if isinstance(item, BaseException):
             raise item
@@ -236,6 +245,15 @@ class BoundedAdapterTests(unittest.IsolatedAsyncioTestCase):
         client = BoundedAppServerClient(self._profile(preserve_rpc_errors=True), ws)
         with self.assertRaises(BoundedRpcError):
             await client.request("thread/read", {}, request_id=1)
+        with self.assertRaisesRegex(BoundedProtocolError, "duplicate"):
+            await client.request("thread/read", {}, request_id=1)
+        self.assertEqual(len(ws.sent), 1)
+        self.assertTrue(ws.closed)
+
+    async def test_default_mode_rejects_duplicate_id_before_send(self) -> None:
+        ws = MockWebSocket([{"id": 1, "result": {"ok": True}}])
+        client = BoundedAppServerClient(self._profile(), ws)
+        await client.request("thread/read", {}, request_id=1)
         with self.assertRaisesRegex(BoundedProtocolError, "duplicate"):
             await client.request("thread/read", {}, request_id=1)
         self.assertEqual(len(ws.sent), 1)
@@ -396,6 +414,7 @@ class BoundedAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.result, {"first": True})
         with self.assertRaisesRegex(BoundedProtocolError, "duplicate"):
             await client.request("initialize", {}, request_id=17)
+        self.assertEqual(len(ws.sent), 1)
 
     async def test_notification_count_limit_is_enforced(self) -> None:
         ws = MockWebSocket(
@@ -475,6 +494,27 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(ws.sent[0]["id"], 9)
         self.assertEqual(ws.sent[0]["result"], {"answers": {}})
+
+    async def test_interactive_approval_displays_bounded_scope_before_accepting(self) -> None:
+        ws = MockWebSocket([])
+        output = io.StringIO()
+        with mock.patch("codex_ws_client._interactive_approvals_enabled", True), mock.patch(
+            "codex_ws_client.prompt_choice", return_value="a"
+        ), redirect_stderr(output):
+            handled = await default_server_request_handler(
+                ws,
+                {
+                    "id": 10,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"command": "git status", "cwd": "C:/repo", "reason": "inspect changes"},
+                },
+            )
+        self.assertTrue(handled)
+        self.assertEqual(ws.sent[0]["result"], {"decision": "accept"})
+        displayed = output.getvalue()
+        self.assertIn("git status", displayed)
+        self.assertIn("C:/repo", displayed)
+        self.assertIn("inspect changes", displayed)
 
     async def test_cli_protocol_core_accepts_source_shaped_response_without_jsonrpc(self) -> None:
         ws = MockWebSocket([])
@@ -696,6 +736,32 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((thread_id, reused), ("fresh-ttl", False))
         self.assertEqual(args.rotation, {"decision": "fresh_thread", "reason": "resume_ttl_exceeded"})
         self.assertGreater(args.resume_idle_duration_seconds, 1)
+
+    async def test_resume_ttl_rotation_requires_creation_selector(self) -> None:
+        class ThreadClient:
+            async def read_thread(self, thread_id: str, timeout: float | None, *, include_turns: bool = False) -> dict[str, object]:
+                return {"thread": {"id": thread_id, "updatedAt": "2020-01-01T00:00:00Z"}}
+
+            async def start_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                raise AssertionError("rotation must fail before starting an unscoped thread")
+
+            async def resume_thread(self, params: dict[str, object], timeout: float | None) -> dict[str, object]:
+                raise AssertionError("expired thread must not be resumed")
+
+        args = SimpleNamespace(
+            thread_id="old-thread",
+            cwd=".",
+            sandbox="",
+            permissions="",
+            model="gpt-5",
+            personality="pragmatic",
+            instructions="dev",
+            ephemeral=False,
+            print_thread_id=False,
+            resume_ttl=1,
+        )
+        with self.assertRaisesRegex(ValueError, "no creation permission selector"):
+            await ensure_thread(ThreadClient(), args, "C:/repo", 1, 1)
 
     async def test_resume_ttl_fails_closed_to_fresh_thread_when_idle_timestamp_missing(self) -> None:
         class ThreadClient:
@@ -1038,10 +1104,10 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exit_code, EXIT_SUCCESS)
         self.assertEqual(ws.sent[0]["method"], "turn/start")
         self.assertNotIn("cwd", ws.sent[0]["params"])
-        self.assertTrue(ws.closed)
-        self.assertEqual(ws.close_calls, 1)
+        self.assertFalse(ws.closed)
+        self.assertEqual(ws.close_calls, 0)
 
-    async def test_turn_completion_closes_socket_on_terminal_response(self) -> None:
+    async def test_turn_completion_keeps_owner_socket_open(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
         args = SimpleNamespace(no_stream=True, json=False, output_schema="", summary=False, out="")
@@ -1057,8 +1123,64 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         ws.recv = recv  # type: ignore[method-assign]
         exit_code, _ = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
         self.assertEqual(exit_code, EXIT_SUCCESS)
-        self.assertTrue(ws.closed)
-        self.assertEqual(ws.close_calls, 1)
+        self.assertFalse(ws.closed)
+        self.assertEqual(ws.close_calls, 0)
+
+    async def test_two_turns_can_share_the_connection(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(no_stream=True, json=False, output_schema="", summary=False, out="")
+        next_turn = 0
+        recv_calls = 0
+
+        async def recv() -> str:
+            nonlocal next_turn, recv_calls
+            recv_calls += 1
+            request = ws.sent[-1]
+            if recv_calls % 2 == 1:
+                next_turn += 1
+                turn_id = f"turn-{next_turn}"
+                return json.dumps(response_for(request, {"turn": {"id": turn_id}}))
+            turn_id = f"turn-{next_turn}"
+            return json.dumps(
+                {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}}
+            )
+
+        ws.recv = recv  # type: ignore[method-assign]
+        first_code, _ = await run_turn(client, args, "thread-1", None, "first", 1, None)
+        second_code, _ = await run_turn(client, args, "thread-1", None, "second", 1, None)
+        self.assertEqual((first_code, second_code), (EXIT_SUCCESS, EXIT_SUCCESS))
+        self.assertEqual([message["method"] for message in ws.sent], ["turn/start", "turn/start"])
+        self.assertFalse(ws.closed)
+
+    async def test_streamed_output_prefers_completed_final_and_separates_commentary(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+        args = SimpleNamespace(no_stream=True, json=True, output_schema="", summary=False, out="")
+        responses = [
+            {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"turnId": "turn-1", "itemId": "msg-1", "phase": "commentary", "delta": "progress "}},
+            {"jsonrpc": "2.0", "method": "item/completed", "params": {"turnId": "turn-1", "item": {"type": "agentMessage", "id": "msg-1", "phase": "commentary", "text": "progress complete"}}},
+            {"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"turnId": "turn-1", "itemId": "msg-2", "phase": "final_answer", "delta": "partial"}},
+            {"jsonrpc": "2.0", "method": "item/completed", "params": {"turnId": "turn-1", "item": {"type": "agentMessage", "id": "msg-2", "phase": "final_answer", "text": "authoritative final"}}},
+            {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}},
+        ]
+
+        async def recv() -> str:
+            nonlocal responses
+            if not responses:
+                raise AssertionError("unexpected receive")
+            if len(responses) == 5:
+                responses = responses[1:]
+                return json.dumps(response_for(ws.sent[-1], {"turn": {"id": "turn-1"}}))
+            return json.dumps(responses.pop(0))
+
+        ws.recv = recv  # type: ignore[method-assign]
+        exit_code, result = await run_turn(client, args, "thread-1", None, "prompt", 1, None)
+        self.assertEqual(exit_code, EXIT_SUCCESS)
+        assert result is not None
+        self.assertEqual(result["text"], "authoritative final")
+        self.assertEqual(result["commentary"], "progress complete")
+        self.assertEqual([message["text"] for message in result["messages"]], ["progress complete", "authoritative final"])
 
     async def test_json_turn_result_includes_effective_sandbox(self) -> None:
         ws = MockWebSocket([])
@@ -1152,6 +1274,78 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             "cache_write_tokens": 10,
         })
 
+    async def test_detached_failure_keeps_accepted_turn_context_without_resubmitting(self) -> None:
+        class Connection:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+        class FakeClient:
+            instances: list["FakeClient"] = []
+
+            def __init__(self, _ws, **_kwargs):
+                self.calls: list[str] = []
+                FakeClient.instances.append(self)
+
+            async def initialize(self, _timeout):
+                self.calls.append("initialize")
+
+            async def start_thread(self, _params, _timeout):
+                self.calls.append("thread/start")
+                return {"thread": {"id": "thread-1"}}
+
+            async def request(self, method, _params=None, **_kwargs):
+                self.calls.append(method)
+                return {"turn": {"id": "accepted-turn-123", "status": "inProgress"}}
+
+            async def unsubscribe_thread(self, _thread_id, timeout=None):
+                self.calls.append("thread/unsubscribe")
+                if failure == "timeout":
+                    raise asyncio.TimeoutError()
+                raise ProtocolTransportError("App Server transport closed")
+
+        for failure, expected_code in (("timeout", EXIT_TIMEOUT), ("transport", EXIT_CONNECTION_FAILURE)):
+            with self.subTest(failure=failure):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "codex_ws_client.py",
+                        "--json",
+                        "--detach",
+                        "--sandbox",
+                        "read-only",
+                        "--timeout",
+                        "1",
+                        "--connect-timeout",
+                        "1",
+                        "prompt",
+                    ],
+                ):
+                    args = parse_args()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr), mock.patch.object(
+                    client_module, "ProtocolClient", FakeClient
+                ), mock.patch.object(
+                    client_module, "resolve_default_model", return_value="fixture-model"
+                ), mock.patch.object(
+                    client_module, "install_sigint_handler"
+                ), mock.patch.object(
+                    client_module.websockets, "connect", new=mock.AsyncMock(return_value=Connection())
+                ):
+                    result_code = await run_client(args)
+                self.assertEqual(result_code, expected_code)
+                failure_result = json.loads(stdout.getvalue())
+                self.assertEqual(failure_result["status"], "unknown")
+                self.assertEqual(failure_result["thread_id"], "thread-1")
+                self.assertEqual(failure_result["turn_id"], "accepted-turn-123")
+                self.assertEqual(failure_result["phase"], "unsubscribing")
+                self.assertEqual(FakeClient.instances[-1].calls.count("turn/start"), 1)
+                self.assertEqual(FakeClient.instances[-1].calls[-1], "thread/unsubscribe")
+                self.assertEqual(stderr.getvalue(), "")
+
     async def test_cancel_requests_interrupt_on_next_loop_iteration(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
@@ -1230,12 +1424,14 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             args = parse_args()
         self.assertIsNone(args.sandbox)
 
-    def test_approval_policy_defaults_to_never(self) -> None:
+    def test_approval_policy_defaults_and_resume_approve_for_me_decision(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--sandbox", "read-only", "prompt"]):
             args = parse_args()
         self.assertEqual(effective_approval_policy(args), "never")
         self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "never")
         self.assertNotIn("approvalPolicy", make_turn_params(args, "thread-1", "C:/repo", "prompt"))
+        # Product decision: omission applies the automatic-review default; it
+        # does not claim to preserve unknown thread-owned approval state.
         resume = make_thread_params(args, "C:/repo", "dev", creation=False)
         self.assertEqual(resume["approvalPolicy"], "on-request")
         self.assertEqual(resume["approvalsReviewer"], "auto_review")
@@ -1678,6 +1874,20 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.sent[0]["params"]["sortKey"], "updated_at")
         self.assertEqual([thread["id"] for thread in result["data"]], ["keep"])
 
+    async def test_section_search_obeys_one_overall_deadline_across_notifications(self) -> None:
+        ws = MockWebSocket([])
+        client = ProtocolClient(ws)
+
+        async def recv() -> str:
+            await asyncio.sleep(0)
+            return json.dumps({"jsonrpc": "2.0", "method": "thread/status/changed", "params": {}})
+
+        ws.recv = recv  # type: ignore[method-assign]
+        started = monotonic()
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(client.search_threads(0.05, title="alpha"), timeout=0.5)
+        self.assertLess(monotonic() - started, 0.3)
+
     async def test_read_thread_uses_include_turns(self) -> None:
         ws = MockWebSocket([])
         client = ProtocolClient(ws)
@@ -1783,6 +1993,43 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
 
     def test_extract_turn_distinguishes_missing_turn(self) -> None:
         self.assertIsNone(extract_turn({"thread": {"id": "thread-1", "turns": []}}, "turn-missing"))
+
+    def test_failure_result_retains_operation_context(self) -> None:
+        args = SimpleNamespace(
+            _active_thread_id="thread-1",
+            _active_turn_id="turn-1",
+            _operation_phase="waiting_for_completion",
+            effective_sandbox="read-only",
+        )
+        result = make_failure_result(args, kind="timeout", message="completion was not observed")
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["phase"], "waiting_for_completion")
+        self.assertEqual(result["thread_id"], "thread-1")
+        self.assertEqual(result["turn_id"], "turn-1")
+        self.assertEqual(result["sandbox"], "read-only")
+        self.assertEqual(result["error"]["kind"], "timeout")
+
+    def test_extract_turn_separates_explicit_commentary_from_final_answer(self) -> None:
+        result = extract_turn(
+            {
+                "thread": {
+                    "id": "thread-1",
+                    "turns": [{
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {"type": "agentMessage", "id": "commentary", "phase": "commentary", "text": "progress"},
+                            {"type": "agentMessage", "id": "final", "phase": "final_answer", "text": "answer"},
+                        ],
+                    }],
+                }
+            },
+            "turn-1",
+        )
+        assert result is not None
+        self.assertEqual(result["text"], "answer")
+        self.assertEqual(result["commentary"], "progress")
+        self.assertEqual([item["id"] for item in result["messages"]], ["commentary", "final"])
 
     def test_generated_schema_manifest_matches_installed_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

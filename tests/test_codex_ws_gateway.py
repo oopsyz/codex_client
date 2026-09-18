@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import unittest
 from pathlib import Path
@@ -19,6 +20,8 @@ from codex_ws_gateway import (  # noqa: E402
     AuthThrottle,
     Gateway,
     GatewayConfig,
+    RelayActivity,
+    configure_logging,
     log_security_banner,
     origin_allowed,
     parse_args,
@@ -274,6 +277,57 @@ class ArgsTest(unittest.TestCase):
         self.assertEqual(args.listen_host, "0.0.0.0")
         self.assertEqual(args.upstream, "ws://127.0.0.1:8765")
         self.assertEqual(args.token_env, "CODEX_GATEWAY_TOKEN")
+
+
+class GatewayLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_activity_keeps_quiet_direction_alive(self) -> None:
+        gateway = Gateway(GatewayConfig(upstream="ws://127.0.0.1:1", token=TOKEN, idle_timeout=0.05))
+        activity = RelayActivity()
+
+        class SilentSource:
+            async def recv(self):
+                await asyncio.sleep(10)
+
+        class ActiveSource:
+            async def recv(self):
+                await asyncio.sleep(0.01)
+                return "delta"
+
+        class Sink:
+            def __init__(self):
+                self.closed = False
+
+            async def send(self, _message):
+                return None
+
+            async def close(self, **_kwargs):
+                self.closed = True
+
+        silent_sink = Sink()
+        active_sink = Sink()
+        silent = asyncio.create_task(gateway._pump("c1", SilentSource(), silent_sink, "client->upstream", activity))
+        active = asyncio.create_task(gateway._pump("c1", ActiveSource(), active_sink, "upstream->client", activity))
+        try:
+            await asyncio.sleep(0.15)
+            self.assertFalse(silent.done())
+            self.assertFalse(silent_sink.closed)
+        finally:
+            silent.cancel()
+            active.cancel()
+            await asyncio.gather(silent, active, return_exceptions=True)
+
+    def test_verbose_logging_does_not_enable_websocket_wire_debug(self) -> None:
+        gateway_logger = logging.getLogger("codex-ws-gateway")
+        websockets_logger = logging.getLogger("websockets")
+        old_gateway = gateway_logger.level
+        old_websockets = websockets_logger.level
+        try:
+            configure_logging(1)
+            self.assertEqual(gateway_logger.level, logging.DEBUG)
+            self.assertGreaterEqual(websockets_logger.level, logging.WARNING)
+        finally:
+            gateway_logger.setLevel(old_gateway)
+            websockets_logger.setLevel(old_websockets)
 
 
 if __name__ == "__main__":
