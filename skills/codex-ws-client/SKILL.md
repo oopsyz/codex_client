@@ -192,6 +192,8 @@ With `--json`, expect:
 - `status`
 - effective `sandbox`
 - `text`
+- optional `commentary` and normalized `messages` when message phases are
+  available
 - optional `error`
 - optional `notifications`
 - optional `metrics`
@@ -212,6 +214,9 @@ The client reads usage from `thread/tokenUsage/updated` and model reroutes from
 `model/rerouted`. Use `--resume-ttl SECONDS` to make persisted-thread resume
 TTL-aware; an idle thread beyond the TTL is replaced with a fresh thread. The
 default `0` preserves unconditional resume while collecting baseline metrics.
+Timeouts and transport failures report `status: "unknown"`, the current phase,
+and any known thread/turn identifiers in JSON mode; reconcile the persisted
+turn before retrying.
 
 ## When to load more detail
 

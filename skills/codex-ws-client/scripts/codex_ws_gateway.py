@@ -130,6 +130,17 @@ class GatewayConfig:
     allowed_origins: frozenset[str] = frozenset()
 
 
+@dataclass
+class RelayActivity:
+    """Shared application activity for both directions of one relay."""
+
+    last_activity: float = field(default_factory=monotonic)
+    closed: bool = False
+
+    def touch(self) -> None:
+        self.last_activity = monotonic()
+
+
 class Gateway:
     def __init__(self, config: GatewayConfig) -> None:
         self.config = config
@@ -209,9 +220,10 @@ class Gateway:
             log.info("[%s] closed %s (active=%d)", cid, peer, self.active)
 
     async def _relay(self, cid: str, client: Any, upstream: Any) -> None:
+        activity = RelayActivity()
         pumps = [
-            asyncio.create_task(self._pump(cid, client, upstream, "client->upstream")),
-            asyncio.create_task(self._pump(cid, upstream, client, "upstream->client")),
+            asyncio.create_task(self._pump(cid, client, upstream, "client->upstream", activity)),
+            asyncio.create_task(self._pump(cid, upstream, client, "upstream->client", activity)),
         ]
         done, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
@@ -222,18 +234,32 @@ class Gateway:
             if exc is not None and not isinstance(exc, websockets.exceptions.ConnectionClosed):
                 log.error("[%s] relay error: %s", cid, exc)
 
-    async def _pump(self, cid: str, source: Any, sink: Any, direction: str) -> None:
+    async def _pump(
+        self, cid: str, source: Any, sink: Any, direction: str, activity: RelayActivity | None = None
+    ) -> None:
+        activity = activity or RelayActivity()
         timeout = self.config.idle_timeout or None
         while True:
+            remaining = None
+            if timeout is not None:
+                remaining = timeout - (monotonic() - activity.last_activity)
+                if remaining <= 0:
+                    if not activity.closed:
+                        activity.closed = True
+                        log.info("[%s] idle timeout on relay", cid)
+                        await sink.close(code=1001, reason="idle timeout")
+                    return
             try:
-                message = await asyncio.wait_for(source.recv(), timeout=timeout)
+                message = await asyncio.wait_for(source.recv(), timeout=remaining)
             except asyncio.TimeoutError:
-                log.info("[%s] idle timeout on %s", cid, direction)
-                await sink.close(code=1001, reason="idle timeout")
-                return
+                # The other direction may have forwarded a frame while this
+                # receive was waiting. Recompute against shared activity
+                # before declaring the connection idle.
+                continue
             except websockets.exceptions.ConnectionClosed:
                 await sink.close()
                 return
+            activity.touch()
             await sink.send(message)
 
 
@@ -281,6 +307,16 @@ def log_security_banner(warnings: list[str]) -> None:
     for warning in warnings:
         log.warning("-> %s", warning)
     log.warning("=" * 78)
+
+
+def configure_logging(verbose: int) -> None:
+    """Enable gateway diagnostics without enabling raw WebSocket wire logs."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+    )
+    log.setLevel(logging.DEBUG if verbose else logging.INFO)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
 
 def current_user() -> str:
@@ -411,10 +447,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-    )
+    configure_logging(args.verbose)
 
     if args.new_token:
         print(secrets.token_urlsafe(32))

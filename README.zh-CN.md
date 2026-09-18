@@ -122,7 +122,9 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PRO
 - 如果传入 `--thread-id`，客户端会调用 `thread/resume`
 - 恢复线程后的轮次会使用 `--resume-timeout`
 - 创建新提示线程时必须且只能选择一种权限策略：显式指定 `--sandbox read-only`、`--sandbox workspace-write`、`--sandbox danger-full-access`，或指定命名配置 `--permissions PROFILE_ID`
-- `--sandbox` 与 `--permissions` 不能同时使用；恢复已有线程时两者都不能传入，如需更改权限策略，请创建新线程
+- `--sandbox` 与 `--permissions` 不能同时使用；恢复已有线程时不能传入
+  `--sandbox`，命名的 `--permissions` 可在 `turn/start` 中选择本轮配置，
+  但不会发送给 `thread/resume`；如需更改线程级权限策略，请创建新线程
 - 恢复持久线程且未显式指定 `--approval-policy` 时，`thread/resume` 和
   `turn/start` 会使用 `approvalPolicy: on-request` 与
   `approvalsReviewer: auto_review`；沙箱选择仍保持独立

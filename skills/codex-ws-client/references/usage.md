@@ -127,17 +127,22 @@ Interactive approvals:
 
 `--json` emits a structured object with:
 - ids and final text
+- optional commentary and normalized message items when phases are available
 - status and optional error
 - effective sandbox
 - notification summaries
 - metrics such as latency and token counts
+
+Authoritative completed agent-message items replace partial deltas. Timeout and
+transport failures in JSON mode include `status: "unknown"`, the current phase,
+and any known thread/turn IDs; reconcile the persisted turn before retrying.
 
 With `--detach --json`, the object contains `thread_id`, `turn_id`, `status: "detached"`, `turn_status`, `unsubscribe_status`, and effective `sandbox`. The detached status only means that the client unsubscribed successfully; it is not the final turn status. Plain detached output includes `SANDBOX=` as well.
 
 The output field keeps its legacy `sandbox` name. For a thread created with
 `--permissions`, it contains the selected profile id.
 
-Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, concatenated agent-message `text`, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
+Use `--read-turn THREAD_ID TURN_ID` to read one persisted turn in normalized form. The result contains `thread_id`, `turn_id`, `status`, selected final-answer `text`, optional commentary/messages, the raw `turn`, and an optional `error`. A missing turn returns `status: "not_found"`.
 
 Correct an active turn without creating another turn or changing its binding:
 

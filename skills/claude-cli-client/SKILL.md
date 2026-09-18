@@ -73,7 +73,14 @@ python .codex/skills/claude-cli-client/scripts/claude_cli_client.py --json --ndj
 - `--no-session-persistence` disables future resume, so it cannot be combined with `--detach`.
 - In REPL mode, `/new` starts a fresh session.
 - `--detach` spawns the CLI in its own process group and returns `status: "detached"` with a `pid`. Nothing is streamed back; pass `--detach-log` to capture the child's output.
+- `--detach` cannot be combined with `--continue` or `--fork-session`, because
+  those modes can produce a session ID that is not knowable before the child
+  emits its startup event.
 - `--continue` resumes the most recent conversation in `--cwd` and cannot be combined with `--session-id` or `--repl`.
+- `--tools` preserves omitted versus explicit values: `--tools ""` forwards an
+  empty built-in tool set, while omitting the flag leaves the CLI default in
+  control. `--allowed-tools` and `--disallowed-tools` remain separate MCP/tool
+  restrictions.
 
 ## Output contract
 

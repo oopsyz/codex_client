@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from urllib.parse import urlparse
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 DEFAULT_URI = "ws://127.0.0.1:8765"
 DEFAULT_MODEL = "gpt-5.1-codex"
@@ -221,6 +222,10 @@ class ProtocolParseError(RuntimeError):
     """Raised when the server sends malformed JSON-RPC payloads."""
 
 
+class ProtocolTransportError(ProtocolParseError):
+    """Raised when the app-server transport closes before a response arrives."""
+
+
 class BoundedProtocolError(ProtocolParseError):
     """Raised when the bounded one-request adapter must fail closed."""
 
@@ -401,8 +406,13 @@ class JsonRpcCore:
             raw = await asyncio.wait_for(self.ws.recv(), timeout=wait_timeout)
         except asyncio.TimeoutError:
             raise
-        except Exception as exc:
-            raise ProtocolParseError("App Server transport closed") from exc
+        except ConnectionClosed:
+            # Preserve the transport exception so callers can distinguish a
+            # lost connection from malformed JSON.  The outer client owns the
+            # connection and can still emit the operation context it has.
+            raise
+        except (ConnectionError, OSError) as exc:
+            raise ProtocolTransportError("App Server transport closed") from exc
         if not isinstance(raw, (str, bytes)):
             raise ProtocolParseError("App Server frame has an invalid type")
         self._record_frame(raw)
@@ -712,7 +722,10 @@ class BoundedAppServerClient:
             trace=False,
         )
         self._closed = False
-        self._seen_response_ids: set[str | int] = set()
+        # IDs are reserved before a frame is sent.  A duplicate must never be
+        # allowed to reach the transport, even when RPC errors are normalized
+        # instead of preserved.
+        self._reserved_request_ids: set[str | int] = set()
         self._attempt_deadline = attempt_deadline or TurnDeadline(profile.attempt_timeout)
         self._notification_count = 0
 
@@ -856,8 +869,9 @@ class BoundedAppServerClient:
         budget = self._budget(deadline)
         notifications: list[NotificationObservation] = []
         try:
-            if self.profile.preserve_rpc_errors and request_id in self._seen_response_ids:
+            if request_id in self._reserved_request_ids:
                 raise BoundedProtocolError("duplicate App Server response id")
+            self._reserved_request_ids.add(request_id)
             result = await self._core.request_once(
                 method,
                 dict(params or {}),
@@ -873,12 +887,8 @@ class BoundedAppServerClient:
                 rpc_error_factory=BoundedRpcError.from_payload if self.profile.preserve_rpc_errors else None,
                 include_jsonrpc=False,
             )
-            if request_id in self._seen_response_ids:
-                raise BoundedProtocolError("duplicate App Server response id")
-            self._seen_response_ids.add(request_id)
             return BoundedRequestResult(result, tuple(notifications))
         except BoundedRpcError:
-            self._seen_response_ids.add(request_id)
             raise
         except asyncio.CancelledError:
             await self._close_after_cancellation()
@@ -1180,6 +1190,7 @@ class ProtocolClient:
         updated_after: str = "",
         updated_before: str = "",
         section_id: str = "",
+        deadline: TurnDeadline | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"sortKey": sort_key, "sortDirection": sort_direction, "limit": limit}
         if section_id:
@@ -1202,7 +1213,7 @@ class ProtocolClient:
             params["parentThreadId"] = parent_thread_id
         if ancestor_thread_id:
             params["ancestorThreadId"] = ancestor_thread_id
-        response = await self.request("thread/list", params, timeout=timeout)
+        response = await self.request("thread/list", params, timeout=timeout, deadline=deadline)
         threads = list(response.get("data", []))
 
         def _as_number(value: Any) -> float | None:
@@ -1254,16 +1265,8 @@ class ProtocolClient:
         if filters.get("cursor"):
             raise ValueError("Section-aware search requires an initial search, not a list cursor")
         filters = {k: v for k, v in filters.items() if k != "cursor"}
-        deadline = None if timeout is None else monotonic() + timeout
+        deadline = TurnDeadline(timeout)
         remaining_pages = 100
-
-        def remaining() -> float | None:
-            if deadline is None:
-                return None
-            value = deadline - monotonic()
-            if value <= 0:
-                raise asyncio.TimeoutError("Task search deadline exceeded")
-            return value
 
         async def pages(method: str, section_id: str = "") -> list[dict[str, Any]]:
             nonlocal remaining_pages
@@ -1278,9 +1281,15 @@ class ProtocolClient:
                     params: dict[str, Any] = {"limit": 100}
                     if cursor:
                         params["cursor"] = cursor
-                    page = await self.request(method, params, timeout=remaining())
+                    page = await self.request(method, params, timeout=None, deadline=deadline)
                 else:
-                    page = await self.list_threads(remaining(), **filters, cursor=cursor, section_id=section_id)
+                    page = await self.list_threads(
+                        None,
+                        **filters,
+                        cursor=cursor,
+                        section_id=section_id,
+                        deadline=deadline,
+                    )
                 rows.extend(page["data"])
                 cursor = page.get("nextCursor")
                 if not cursor:
@@ -1310,6 +1319,106 @@ class ProtocolClient:
         return await self.request("thread/name/set", {"threadId": thread_id, "name": name}, timeout=timeout)
 
 
+def _message_phase(value: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    phase = value.get("phase")
+    return phase if isinstance(phase, str) and phase else None
+
+
+def _message_item_id(params: Mapping[str, Any] | None = None, item: Mapping[str, Any] | None = None) -> str | None:
+    for source, keys in (
+        (item, ("id", "itemId", "item_id")),
+        (params, ("itemId", "item_id")),
+    ):
+        if isinstance(source, Mapping):
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value):
+                    return str(value)
+    return None
+
+
+class AgentMessageAccumulator:
+    """Reconstruct agent messages while treating completed items as authoritative."""
+
+    def __init__(self) -> None:
+        self._entries: list[dict[str, Any]] = []
+        self._by_id: dict[str, dict[str, Any]] = {}
+        self._anonymous_counter = 0
+
+    def _entry(self, item_id: str | None, phase: str | None) -> dict[str, Any]:
+        if item_id is None:
+            for candidate in reversed(self._entries):
+                if candidate.get("anonymous") and not candidate.get("completed"):
+                    if phase and not candidate.get("phase"):
+                        candidate["phase"] = phase
+                    return candidate
+            self._anonymous_counter += 1
+            item_id = f"anonymous-{self._anonymous_counter}"
+            anonymous = True
+        else:
+            anonymous = False
+        entry = self._by_id.get(item_id)
+        if entry is None:
+            entry = {
+                "id": item_id,
+                "phase": phase,
+                "delta": "",
+                "completed_text": None,
+                "completed": False,
+                "anonymous": anonymous,
+            }
+            self._entries.append(entry)
+            self._by_id[item_id] = entry
+        elif phase and not entry.get("phase"):
+            entry["phase"] = phase
+        return entry
+
+    def add_delta(self, delta: str, *, item_id: str | None = None, phase: str | None = None) -> None:
+        if not isinstance(delta, str):
+            return
+        entry = self._entry(item_id, phase)
+        entry["delta"] += delta
+
+    def complete(self, item: Mapping[str, Any], *, item_id: str | None = None, phase: str | None = None) -> None:
+        resolved_id = item_id or _message_item_id(item=item)
+        if resolved_id is None:
+            for candidate in reversed(self._entries):
+                if not candidate.get("completed"):
+                    resolved_id = str(candidate["id"])
+                    break
+        text = item.get("text")
+        entry = self._entry(resolved_id, phase or _message_phase(item))
+        if isinstance(text, str):
+            entry["completed_text"] = text
+        entry["completed"] = True
+
+    def normalized(self) -> dict[str, Any]:
+        messages: list[dict[str, Any]] = []
+        for entry in self._entries:
+            text = entry["completed_text"] if entry["completed_text"] is not None else entry["delta"]
+            if not isinstance(text, str):
+                continue
+            messages.append({
+                "id": entry["id"],
+                **({"phase": entry["phase"]} if entry.get("phase") else {}),
+                "text": text,
+            })
+        explicit_final = [item for item in messages if item.get("phase") == "final_answer"]
+        selected = (
+            [item for item in messages if item.get("phase") in {None, "final_answer"}]
+            if explicit_final
+            else messages
+        )
+        commentary = "".join(item["text"] for item in messages if item.get("phase") == "commentary")
+        return {
+            "text": "".join(item["text"] for item in selected).strip(),
+            "commentary": commentary.strip(),
+            "messages": messages,
+        }
+
+
 def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, Any] | None:
     """Extract a normalized turn result from a ``thread/read`` response.
 
@@ -1328,19 +1437,22 @@ def extract_turn(thread_response: Mapping[str, Any], turn_id: str) -> dict[str, 
         if not isinstance(candidate, Mapping) or str(candidate.get("id") or "") != requested_id:
             continue
         items = candidate.get("items")
-        text_parts: list[str] = []
+        messages = AgentMessageAccumulator()
         if isinstance(items, list):
             for item in items:
                 if isinstance(item, Mapping) and item.get("type") == "agentMessage":
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        text_parts.append(text)
+                    messages.complete(item)
+        normalized = messages.normalized()
         result: dict[str, Any] = {
             "thread_id": str(thread.get("id") or ""),
             "turn_id": requested_id,
             "status": str(candidate.get("status") or "unknown"),
-            "text": "".join(text_parts),
+            "text": normalized["text"],
         }
+        if normalized["commentary"]:
+            result["commentary"] = normalized["commentary"]
+        if normalized["messages"]:
+            result["messages"] = normalized["messages"]
         if candidate.get("error") is not None:
             result["error"] = candidate.get("error")
         metrics = turn_metrics(candidate)
@@ -1412,23 +1524,55 @@ async def default_notification_handler(ws: Any, message: dict[str, Any], verbosi
     return False
 
 
+def _bounded_json(value: Any, limit: int = 2000) -> str:
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        rendered = repr(value)
+    if len(rendered) > limit:
+        return rendered[: max(0, limit - 16)] + "... [truncated]"
+    return rendered
+
+
+def approval_request_summary(method: str, params: Mapping[str, Any]) -> str:
+    """Render the bounded authorization scope before asking for a decision."""
+    lines = [f"\nApproval requested for {method}."]
+    displayed = False
+    for key in ("command", "cmd", "cwd", "reason", "permissions", "changes", "fileChanges", "patch"):
+        if key in params:
+            lines.append(f"  {key}: {_bounded_json(params[key])}")
+            displayed = True
+    if not displayed:
+        lines.append(f"  details: {_bounded_json(params)}")
+    return "\n".join(lines)
+
+
+async def _prompt_choice_async(prompt: str, valid: set[str], default: str) -> str:
+    # Human input must not stop the transport loop from receiving unrelated
+    # messages or completing other protocol work.
+    return await asyncio.to_thread(prompt_choice, prompt, valid, default)
+
+
 async def default_server_request_handler(ws: Any, message: dict[str, Any], _verbosity: int = 0) -> bool:
     if not is_server_request(message):
         return False
     method = message.get("method", "")
     req_id = message.get("id")
+    params = message.get("params", {})
+    if not isinstance(params, Mapping):
+        params = {}
     if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval", "execCommandApproval", "applyPatchApproval"}:
         if _interactive_approvals_enabled:
-            print(f"\nApproval requested for {method}.", file=sys.stderr)
-            choice = prompt_choice("Approve? [a]ccept/[d]ecline (default d): ", {"a", "d"}, "d")
+            print(approval_request_summary(method, params), file=sys.stderr)
+            choice = await _prompt_choice_async("Approve? [a]ccept/[d]ecline (default d): ", {"a", "d"}, "d")
             result = {"decision": "accept" if choice == "a" else "decline"}
         else:
             result = {"decision": "decline"}
     elif method == "item/permissions/requestApproval":
         if _interactive_approvals_enabled:
-            print("\nAdditional permissions requested.", file=sys.stderr)
-            choice = prompt_choice("Grant permissions? [g]rant/[d]eny (default d): ", {"g", "d"}, "d")
-            result = {"permissions": message.get("params", {}).get("permissions", {}) if choice == "g" else {}, "scope": "turn"}
+            print(approval_request_summary(method, params), file=sys.stderr)
+            choice = await _prompt_choice_async("Grant permissions? [g]rant/[d]eny (default d): ", {"g", "d"}, "d")
+            result = {"permissions": params.get("permissions", {}) if choice == "g" else {}, "scope": "turn"}
         else:
             result = {"permissions": {}, "scope": "turn"}
     elif method == "mcpServer/elicitation/request":
@@ -1681,6 +1825,8 @@ def make_json_result(
     *,
     sandbox: str | None = None,
     metrics: Mapping[str, Any] | None = None,
+    commentary: str | None = None,
+    messages: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "thread_id": thread_id,
@@ -1691,9 +1837,51 @@ def make_json_result(
     }
     if error is not None:
         result["error"] = error
+    if commentary:
+        result["commentary"] = commentary
+    if messages:
+        result["messages"] = [dict(message) for message in messages]
     if metrics:
         result["metrics"] = dict(metrics)
     return result
+
+
+def operation_context(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        "thread_id": str(getattr(args, "_active_thread_id", "") or ""),
+        "turn_id": str(getattr(args, "_active_turn_id", "") or ""),
+        "phase": str(getattr(args, "_operation_phase", "unknown") or "unknown"),
+    }
+
+
+def make_failure_result(
+    args: argparse.Namespace,
+    *,
+    kind: str,
+    message: str,
+    status: str = "unknown",
+    phase: str | None = None,
+    detail: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = operation_context(args)
+    result: dict[str, Any] = {
+        "status": status,
+        "phase": phase or context["phase"],
+        "thread_id": context["thread_id"],
+        "turn_id": context["turn_id"],
+        "sandbox": getattr(args, "effective_sandbox", None),
+        "error": {"kind": kind, "message": message},
+    }
+    if detail:
+        result["error"].update(dict(detail))
+    return result
+
+
+def emit_failure(args: argparse.Namespace, message: str, result: Mapping[str, Any]) -> None:
+    if getattr(args, "json", False):
+        safe_print(json.dumps(dict(result), indent=2))
+    else:
+        print(message, file=sys.stderr)
 
 
 def _number(value: Any) -> int | float | None:
@@ -2005,7 +2193,14 @@ async def ensure_thread(
             force_new = True
             rotation_reason = "resume_ttl_unavailable"
         if force_new:
-            result = await client.start_thread(make_thread_params(args, cwd, args.instructions), timeout)
+            try:
+                start_params = make_thread_params(args, cwd, args.instructions)
+            except ValueError as exc:
+                raise ValueError(
+                    "A fresh thread is required for this rotation, but no creation permission selector is available. "
+                    "Pass --permissions PROFILE_ID (or start without --thread-id and choose --sandbox)."
+                ) from exc
+            result = await client.start_thread(start_params, timeout)
             thread_id = result["thread"]["id"]
             args.effective_sandbox = str(getattr(args, "permissions", "") or "").strip() or args.sandbox
             args._resumed = False
@@ -2060,18 +2255,13 @@ async def run_turn(
     turn_id = ""
     usage: Mapping[str, Any] | None = None
     actual_model: str | None = None
+    args._active_thread_id = thread_id
+    args._active_turn_id = ""
+    args._operation_phase = "starting_turn"
     turn_idle_seconds = getattr(args, "resume_idle_duration_seconds", None)
     previous_completed = getattr(args, "_last_turn_completed_at", None)
     if isinstance(previous_completed, (int, float)):
         turn_idle_seconds = max(0.0, started_at - previous_completed)
-
-    async def _close_client() -> None:
-        close = getattr(client, "close", None)
-        if close is None:
-            return
-        result = close()
-        if inspect.isawaitable(result):
-            await result
 
     try:
         turn = await client.request(
@@ -2081,6 +2271,8 @@ async def run_turn(
             deadline=deadline,
         )
         turn_id = turn["turn"]["id"]
+        args._active_turn_id = turn_id
+        args._operation_phase = "waiting_for_completion"
         started_turn = turn.get("turn", {})
         if isinstance(started_turn, Mapping):
             model = _first(started_turn, "model", "modelName", "model_id", "modelId")
@@ -2088,8 +2280,7 @@ async def run_turn(
                 actual_model = model
         _cancel.active_turn_id = turn_id
         _cancel.cancel_requested = False
-        deltas: list[str] = []
-        completed_text = ""
+        messages = AgentMessageAccumulator()
         while True:
             # Ctrl+C only flips the cancel flag; the interrupt RPC is sent on the next loop
             # iteration, so a quiet/stalled recv still waits for a timeout or a server message.
@@ -2126,13 +2317,21 @@ async def run_turn(
                     actual_model = model
             if method == "item/agentMessage/delta" and params.get("turnId") == turn_id:
                 delta = params.get("delta", "")
-                deltas.append(delta)
+                messages.add_delta(
+                    delta,
+                    item_id=_message_item_id(params),
+                    phase=_message_phase(params),
+                )
                 if not args.no_stream and not args.json:
                     safe_print(delta, end="", flush=True)
             elif method == "item/completed" and params.get("turnId") == turn_id:
                 item = params.get("item", {})
-                if item.get("type") == "agentMessage":
-                    completed_text = item.get("text", "")
+                if isinstance(item, Mapping) and item.get("type") == "agentMessage":
+                    messages.complete(
+                        item,
+                        item_id=_message_item_id(params, item),
+                        phase=_message_phase(item) or _message_phase(params),
+                    )
             elif method == "turn/completed" and params.get("turn", {}).get("id") == turn_id:
                 completed_turn = params.get("turn", {})
                 status = completed_turn.get("status", "completed")
@@ -2143,7 +2342,8 @@ async def run_turn(
                     direct_usage = _first(completed_turn, "usage", "tokenUsage", "token_usage")
                     if isinstance(direct_usage, Mapping):
                         usage = direct_usage
-                text = "".join(deltas).strip() or completed_text.strip()
+                normalized_messages = messages.normalized()
+                text = normalized_messages["text"]
                 enriched_turn = dict(completed_turn) if isinstance(completed_turn, Mapping) else {}
                 if actual_model:
                     enriched_turn["model"] = actual_model
@@ -2166,7 +2366,9 @@ async def run_turn(
                         sandbox=getattr(args, "effective_sandbox", None),
                         metrics=metrics,
                     )
-                    await _close_client()
+                    _cancel.reset()
+                    args._active_turn_id = ""
+                    args._operation_phase = "idle"
                     return EXIT_TURN_FAILURE, result if args.json else result
                 if args.summary:
                     elapsed_ms = int(round((monotonic() - started_at) * 1000))
@@ -2178,7 +2380,9 @@ async def run_turn(
                 if args.out:
                     Path(args.out).write_text(text, encoding="utf-8")
                 if args.json:
-                    await _close_client()
+                    _cancel.reset()
+                    args._active_turn_id = ""
+                    args._operation_phase = "idle"
                     return EXIT_SUCCESS, make_json_result(
                         thread_id,
                         turn_id,
@@ -2186,14 +2390,17 @@ async def run_turn(
                         status,
                         sandbox=getattr(args, "effective_sandbox", None),
                         metrics=metrics,
+                        commentary=normalized_messages["commentary"],
+                        messages=normalized_messages["messages"],
                     )
                 if args.no_stream:
                     safe_print(text)
                 elif text:
                     safe_print()
                 _cancel.reset()
+                args._active_turn_id = ""
+                args._operation_phase = "idle"
                 args._last_turn_completed_at = monotonic()
-                await _close_client()
                 return EXIT_SUCCESS, None
             elif method == "turn/failed":
                 result = make_json_result(
@@ -2211,7 +2418,8 @@ async def run_turn(
                     ),
                 )
                 _cancel.reset()
-                await _close_client()
+                args._active_turn_id = ""
+                args._operation_phase = "idle"
                 return EXIT_TURN_FAILURE, result if args.json else result
     except asyncio.CancelledError:
         if turn_id:
@@ -2220,7 +2428,6 @@ async def run_turn(
             except Exception:
                 pass
         _cancel.reset()
-        await _close_client()
         return EXIT_SIGINT, None
 
 
@@ -2323,6 +2530,9 @@ def resolve_prompt(args: argparse.Namespace) -> str:
 
 async def run_client(args: argparse.Namespace) -> int:
     global _interactive_approvals_enabled
+    args._active_thread_id = str(getattr(args, "thread_id", "") or "")
+    args._active_turn_id = ""
+    args._operation_phase = "validating"
     raw_cwd = str(getattr(args, "cwd", "") or "").strip()
     timeout = args.timeout if args.timeout > 0 else None
     connect_timeout = args.connect_timeout if args.connect_timeout > 0 else None
@@ -2444,19 +2654,28 @@ async def run_client(args: argparse.Namespace) -> int:
         open_ndjson(args.ndjson_file)
     loop = asyncio.get_running_loop()
     install_sigint_handler(loop)
+    args._operation_phase = "connecting"
     try:
         async with asyncio.timeout(connect_timeout) if connect_timeout else asyncio.timeout(None):
             ws = await websockets.connect(args.uri, **connect_kwargs)
     except asyncio.TimeoutError:
-        print(f"Connection timed out after {connect_timeout}s: {args.uri}", file=sys.stderr)
+        result = make_failure_result(
+            args,
+            kind="timeout",
+            message=f"Connection timed out after {connect_timeout}s.",
+            phase="connecting",
+        )
+        emit_failure(args, f"Connection timed out after {connect_timeout}s: {args.uri}", result)
         return EXIT_TIMEOUT
     except Exception as exc:
-        print(f"Connection failed: {exc}", file=sys.stderr)
+        result = make_failure_result(args, kind="connection_failed", message="App Server connection failed.", phase="connecting")
+        emit_failure(args, f"Connection failed: {exc}", result)
         return EXIT_CONNECTION_FAILURE
 
     try:
         async with ws:
             client = ProtocolClient(ws, handle_server_request=default_server_request_handler, handle_notification=default_notification_handler, verbosity=args.verbose)
+            args._operation_phase = "initializing"
             await client.initialize(timeout)
             if args.create_project:
                 result = await client.create_project(make_project_create_params(args), timeout)
@@ -2604,7 +2823,10 @@ async def run_client(args: argparse.Namespace) -> int:
                 result = await client.set_thread_name(thread_id, name, timeout)
                 safe_print(json.dumps(result, indent=2))
                 return EXIT_SUCCESS
+            args._operation_phase = "resolving_thread"
             thread_id, reused = await ensure_thread(client, args, cwd, timeout, resume_timeout)
+            args._active_thread_id = thread_id
+            args._operation_phase = "idle"
             if args.repl:
                 return await run_repl(client, args, thread_id, cwd, timeout, resume_timeout, turn_deadline)
             if args.detach:
@@ -2623,33 +2845,46 @@ async def run_client(args: argparse.Namespace) -> int:
                 safe_print(json.dumps(json_result, indent=2))
             return code
     except asyncio.TimeoutError:
-        print("Timed out waiting for server response.", file=sys.stderr)
+        result = make_failure_result(
+            args,
+            kind="timeout",
+            message="Completion or server response was not observed before the deadline.",
+        )
+        emit_failure(args, "Timed out waiting for server response.", result)
         return EXIT_TIMEOUT
+    except ProtocolTransportError as exc:
+        result = make_failure_result(args, kind="transport_closed", message=str(exc))
+        emit_failure(args, str(exc), result)
+        return EXIT_CONNECTION_FAILURE
     except ProtocolParseError as exc:
-        print(str(exc), file=sys.stderr)
+        result = make_failure_result(args, kind="protocol_parse_error", message=str(exc))
+        emit_failure(args, str(exc), result)
         return EXIT_PARSE_ERROR
     except RpcError as exc:
+        result = make_failure_result(
+            args,
+            kind="rpc_error",
+            message=exc.message,
+            status="error",
+            detail=exc.to_dict(),
+        )
         if args.json:
-            safe_print(
-                json.dumps(
-                    {
-                        "status": "error",
-                        "error": exc.to_dict(),
-                        "sandbox": getattr(args, "effective_sandbox", None),
-                    },
-                    indent=2,
-                )
-            )
+            safe_print(json.dumps(result, indent=2))
         else:
             print(f"RPC error [{exc.error_code}]: {exc.message}", file=sys.stderr)
         return EXIT_TURN_FAILURE
+    except ValueError as exc:
+        result = make_failure_result(args, kind="invalid_arguments", message=str(exc), status="error")
+        emit_failure(args, str(exc), result)
+        return EXIT_BAD_ARGS
     except RuntimeError as exc:
         if "Local stdout encoding failed" in str(exc):
             print(str(exc), file=sys.stderr)
             return EXIT_TURN_FAILURE
         raise
-    except websockets.exceptions.ConnectionClosed as exc:
-        print(f"WebSocket connection lost: {exc}", file=sys.stderr)
+    except ConnectionClosed as exc:
+        result = make_failure_result(args, kind="transport_closed", message=f"WebSocket connection lost: {exc}")
+        emit_failure(args, f"WebSocket connection lost: {exc}", result)
         return EXIT_CONNECTION_FAILURE
     finally:
         if args.ndjson_file:
