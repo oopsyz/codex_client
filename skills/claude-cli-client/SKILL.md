@@ -69,8 +69,9 @@ python .codex/skills/claude-cli-client/scripts/claude_cli_client.py --json --ndj
 
 - Transport is local CLI subprocess, not WebSocket.
 - Failed one-shot turns use a bounded cleanup allowance: the wrapper kills and
-  reaps only the immediate child, interrupts its parent-side pipe handling, and
-  does not recursively kill descendants whose ownership it cannot establish.
+  reaps only the immediate child, closes each captured raw stream owner once to
+  interrupt parent-side pipe handling, and does not recursively kill
+  descendants whose ownership it cannot establish.
 - Session reuse maps to Claude `session_id` plus `--resume`.
 - The wrapper normalizes Claude stream-json into a stable result envelope.
 - `--no-session-persistence` disables future resume, so it cannot be combined with `--detach`.

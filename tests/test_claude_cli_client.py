@@ -116,6 +116,7 @@ class ClaudeCliClientTests(unittest.TestCase):
         args = parsed_args("--json", "--no-stream", "prompt")
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "descendant.pid"
+            sentinel_path = Path(directory) / "sentinel"
             script = "\n".join(
                 [
                     "import subprocess, sys, time",
@@ -127,31 +128,87 @@ class ClaudeCliClientTests(unittest.TestCase):
                     "time.sleep(30)",
                 ]
             )
+            captured_pipe_fds: list[int] = []
+            original_capture = client._capture_stream_owners
+
+            def capture_stream_owners(process):
+                owners = original_capture(process)
+                for owner in owners[:2]:
+                    fileno = getattr(owner, "fileno", None)
+                    if callable(fileno):
+                        try:
+                            captured_pipe_fds.append(fileno())
+                        except (OSError, ValueError):
+                            pass
+                return owners
+
+            def release_descendant() -> None:
+                if not pid_path.exists():
+                    return
+                descendant_pid = int(pid_path.read_text(encoding="ascii"))
+                if sys.platform.startswith("win"):
+                    subprocess.run(
+                        ["taskkill", "/PID", str(descendant_pid), "/F"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    try:
+                        os.kill(descendant_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
             started = time.perf_counter()
             turn_elapsed = None
+            open_fds: list[int] = []
             try:
                 with mock.patch.object(
                     client,
                     "build_claude_command",
                     return_value=[sys.executable, "-c", script, str(pid_path)],
+                ), mock.patch.object(
+                    client,
+                    "_capture_stream_owners",
+                    side_effect=capture_stream_owners,
                 ), redirect_stderr(io.StringIO()):
                     code, result, _ = client.run_turn(args, ".", "prompt", "session-1", False, 0.1, 0)
                 turn_elapsed = time.perf_counter() - started
+
+                self.assertTrue(captured_pipe_fds)
+                open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+                if sys.platform.startswith("win"):
+                    # Windows retains the pipe descriptor while the inherited
+                    # handle is live, so release the descendant before the
+                    # owner close can make that descriptor recyclable.
+                    release_descendant()
+                sentinel_fd = None
+                for _ in range(128):
+                    fd = os.open(str(sentinel_path), open_flags, 0o600)
+                    open_fds.append(fd)
+                    if fd in captured_pipe_fds:
+                        sentinel_fd = fd
+                        break
+                self.assertIsNotNone(sentinel_fd)
+                assert sentinel_fd is not None
+                os.write(sentinel_fd, b"sentinel")
+                os.lseek(sentinel_fd, 0, os.SEEK_SET)
+                self.assertEqual(os.read(sentinel_fd, len(b"sentinel")), b"sentinel")
+
+                if not sys.platform.startswith("win"):
+                    release_descendant()
+                time.sleep(client.PROCESS_CLEANUP_TIMEOUT + 0.25)
+                os.lseek(sentinel_fd, 0, os.SEEK_SET)
+                self.assertEqual(os.read(sentinel_fd, len(b"sentinel")), b"sentinel")
+                os.lseek(sentinel_fd, 0, os.SEEK_END)
+                self.assertEqual(os.write(sentinel_fd, b"-still-open"), len(b"-still-open"))
             finally:
-                if pid_path.exists():
-                    descendant_pid = int(pid_path.read_text(encoding="ascii"))
-                    if sys.platform.startswith("win"):
-                        subprocess.run(
-                            ["taskkill", "/PID", str(descendant_pid), "/F"],
-                            check=False,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    else:
-                        try:
-                            os.kill(descendant_pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                release_descendant()
+                for fd in open_fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
         self.assertEqual(code, client.EXIT_TIMEOUT)
         self.assertIsNone(result)
         self.assertIsNotNone(turn_elapsed)

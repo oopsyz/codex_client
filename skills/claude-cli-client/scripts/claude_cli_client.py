@@ -3,7 +3,6 @@
 import argparse
 from collections import deque
 import json
-import os
 import queue
 import shutil
 import subprocess
@@ -304,49 +303,43 @@ def start_stream_reader(
     return lines, thread
 
 
-def _capture_stream_descriptors(process: Any) -> tuple[int | None, ...]:
-    descriptors: list[int | None] = []
+def _capture_stream_owners(process: Any) -> tuple[Any | None, ...]:
+    owners: list[Any | None] = []
     for stream_name in ("stdout", "stderr", "stdin"):
         stream = getattr(process, stream_name, None)
-        fileno = getattr(stream, "fileno", None)
-        if not callable(fileno):
-            descriptors.append(None)
+        if stream is None:
+            owners.append(None)
             continue
         try:
-            descriptors.append(fileno())
-        except (AttributeError, OSError, ValueError):
-            descriptors.append(None)
-    return tuple(descriptors)
+            buffered = getattr(stream, "buffer", None)
+            raw = getattr(buffered, "raw", None)
+        except Exception:
+            raw = None
+        owner = raw if raw is not None else stream
+        owners.append(owner if callable(getattr(owner, "close", None)) else None)
+    return tuple(owners)
 
 
-def _close_stream_descriptors(descriptors: tuple[int | None, ...]) -> None:
-    """Close parent-side pipe descriptors without waiting on TextIO locks."""
-    for descriptor in descriptors:
-        if descriptor is None:
+def close_process_streams(stream_owners: tuple[Any | None, ...]) -> None:
+    """Close each captured stream owner exactly once.
+
+    The raw owner, rather than a bare numeric descriptor or its outer text
+    wrapper, is the sole cleanup owner. That keeps a delayed close tied to the
+    original Python file object instead of allowing it to close a descriptor
+    that the process has already recycled for another file.
+    """
+    closed: set[int] = set()
+    for owner in stream_owners:
+        if owner is None or id(owner) in closed:
+            continue
+        closed.add(id(owner))
+        close = getattr(owner, "close", None)
+        if not callable(close):
             continue
         try:
-            os.close(descriptor)
-        except (OSError, ValueError):
+            close()
+        except Exception:
             pass
-
-
-def close_process_streams(process: Any, timeout: float | None = PROCESS_CLEANUP_TIMEOUT) -> None:
-    def _close() -> None:
-        for stream_name in ("stdout", "stderr", "stdin"):
-            stream = getattr(process, stream_name, None)
-            close = getattr(stream, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-
-    if timeout is None:
-        _close()
-        return
-    closer = threading.Thread(target=_close, daemon=True)
-    closer.start()
-    closer.join(timeout=max(0.0, timeout))
 
 
 def _remaining_cleanup(deadline: float) -> float:
@@ -357,24 +350,26 @@ def terminate_process(
     process: Any,
     *,
     reader_threads: tuple[threading.Thread | None, ...] = (),
-    pipe_descriptors: tuple[int | None, ...] | None = None,
+    stream_owners: tuple[Any | None, ...] | None = None,
     timeout: float = PROCESS_CLEANUP_TIMEOUT,
 ) -> None:
     """Bound immediate-child cleanup without waiting on inherited descendants.
 
     The wrapper owns and terminates only the immediate Claude child. Descendants
     are not recursively killed because their ownership is not known here. The
-    parent-side pipe descriptors are closed in a bounded helper so a platform
-    that blocks descriptor close while a descendant holds a writer cannot block
-    the caller; all joins and buffered stream closes share one cleanup deadline.
+    captured owning stream objects are closed in one bounded helper so a
+    platform that blocks pipe cleanup while a descendant holds a writer cannot
+    block the caller. The outer text wrappers are not closed through a second
+    path; all joins and owner cleanup share one cleanup deadline.
     """
     deadline = perf_counter() + max(0.0, timeout)
-    descriptor_closer = threading.Thread(
-        target=_close_stream_descriptors,
-        args=(pipe_descriptors if pipe_descriptors is not None else (),),
+    owners = stream_owners if stream_owners is not None else _capture_stream_owners(process)
+    owner_closer = threading.Thread(
+        target=close_process_streams,
+        args=(owners,),
         daemon=True,
     )
-    descriptor_closer.start()
+    owner_closer.start()
     try:
         process.kill()
     except (OSError, ProcessLookupError):
@@ -400,8 +395,7 @@ def terminate_process(
         for thread in reader_threads:
             if thread is not None:
                 thread.join(timeout=_remaining_cleanup(deadline))
-        descriptor_closer.join(timeout=_remaining_cleanup(deadline))
-        close_process_streams(process, timeout=_remaining_cleanup(deadline))
+        owner_closer.join(timeout=_remaining_cleanup(deadline))
 
 
 def run_turn(
@@ -434,7 +428,7 @@ def run_turn(
     except OSError as exc:
         print(f"Failed to start Claude CLI: {exc}", file=sys.stderr)
         return EXIT_CONNECTION_FAILURE, None, session_id
-    pipe_descriptors = _capture_stream_descriptors(process)
+    stream_owners = _capture_stream_owners(process)
 
     partials: list[str] = []
     final_text = ""
@@ -457,7 +451,7 @@ def run_turn(
         terminate_process(
             process,
             reader_threads=(stdout_thread, stderr_thread),
-            pipe_descriptors=pipe_descriptors,
+            stream_owners=stream_owners,
         )
 
     try:
