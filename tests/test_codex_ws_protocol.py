@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import hashlib
 import json
@@ -29,9 +29,12 @@ from codex_ws_client import (  # noqa: E402
     BoundedRequestResult,
     default_server_request_handler,
     EXIT_SUCCESS,
+    EXIT_CONNECTION_FAILURE,
+    EXIT_TIMEOUT,
     EXIT_SIGINT,
     _cancel,
     ProtocolClient,
+    ProtocolTransportError,
     NotificationObservation,
     RetryConfig,
     RpcError,
@@ -62,6 +65,7 @@ from codex_ws_client import (  # noqa: E402
     parse_headers,
     turn_metrics,
 )
+import codex_ws_client as client_module  # noqa: E402
 
 # Pinned from npm @openai/codex 0.154.0 (Windows x64), 2026-09-12.
 # generate-json-schema without --experimental; hashes normalize parsed JSON.
@@ -1269,6 +1273,78 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             "cached_tokens": 80,
             "cache_write_tokens": 10,
         })
+
+    async def test_detached_failure_keeps_accepted_turn_context_without_resubmitting(self) -> None:
+        class Connection:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+        class FakeClient:
+            instances: list["FakeClient"] = []
+
+            def __init__(self, _ws, **_kwargs):
+                self.calls: list[str] = []
+                FakeClient.instances.append(self)
+
+            async def initialize(self, _timeout):
+                self.calls.append("initialize")
+
+            async def start_thread(self, _params, _timeout):
+                self.calls.append("thread/start")
+                return {"thread": {"id": "thread-1"}}
+
+            async def request(self, method, _params=None, **_kwargs):
+                self.calls.append(method)
+                return {"turn": {"id": "accepted-turn-123", "status": "inProgress"}}
+
+            async def unsubscribe_thread(self, _thread_id, timeout=None):
+                self.calls.append("thread/unsubscribe")
+                if failure == "timeout":
+                    raise asyncio.TimeoutError()
+                raise ProtocolTransportError("App Server transport closed")
+
+        for failure, expected_code in (("timeout", EXIT_TIMEOUT), ("transport", EXIT_CONNECTION_FAILURE)):
+            with self.subTest(failure=failure):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "codex_ws_client.py",
+                        "--json",
+                        "--detach",
+                        "--sandbox",
+                        "read-only",
+                        "--timeout",
+                        "1",
+                        "--connect-timeout",
+                        "1",
+                        "prompt",
+                    ],
+                ):
+                    args = parse_args()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr), mock.patch.object(
+                    client_module, "ProtocolClient", FakeClient
+                ), mock.patch.object(
+                    client_module, "resolve_default_model", return_value="fixture-model"
+                ), mock.patch.object(
+                    client_module, "install_sigint_handler"
+                ), mock.patch.object(
+                    client_module.websockets, "connect", new=mock.AsyncMock(return_value=Connection())
+                ):
+                    result_code = await run_client(args)
+                self.assertEqual(result_code, expected_code)
+                failure_result = json.loads(stdout.getvalue())
+                self.assertEqual(failure_result["status"], "unknown")
+                self.assertEqual(failure_result["thread_id"], "thread-1")
+                self.assertEqual(failure_result["turn_id"], "accepted-turn-123")
+                self.assertEqual(failure_result["phase"], "unsubscribing")
+                self.assertEqual(FakeClient.instances[-1].calls.count("turn/start"), 1)
+                self.assertEqual(FakeClient.instances[-1].calls[-1], "thread/unsubscribe")
+                self.assertEqual(stderr.getvalue(), "")
 
     async def test_cancel_requests_interrupt_on_next_loop_iteration(self) -> None:
         class FakeClient:

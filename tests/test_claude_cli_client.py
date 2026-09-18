@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 import io
 import json
+import os
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -92,6 +97,65 @@ class ClaudeCliClientTests(unittest.TestCase):
         self.assertEqual(code, client.EXIT_SUCCESS)
         self.assertEqual(result["text"], "done")
         self.assertFalse(process.killed)
+
+    def test_real_child_stderr_flood_does_not_block_stdout(self) -> None:
+        args = parsed_args("--json", "--no-stream", "prompt")
+        script = (
+            "import json, sys; "
+            "sys.stderr.write('x' * 200000); sys.stderr.flush(); "
+            "sys.stdout.write(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'done'}) + '\\n'); "
+            "sys.stdout.flush()"
+        )
+        with mock.patch.object(client, "build_claude_command", return_value=[sys.executable, "-c", script]):
+            with redirect_stderr(io.StringIO()):
+                code, result, _ = client.run_turn(args, ".", "prompt", "session-1", False, 3, 0)
+        self.assertEqual(code, client.EXIT_SUCCESS)
+        self.assertEqual(result["text"], "done")
+
+    def test_cleanup_is_bounded_when_descendant_holds_inherited_pipes(self) -> None:
+        args = parsed_args("--json", "--no-stream", "prompt")
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "descendant.pid"
+            script = "\n".join(
+                [
+                    "import subprocess, sys, time",
+                    "pid_path = sys.argv[1]",
+                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])",
+                    "with open(pid_path, 'w', encoding='ascii') as handle:",
+                    "    handle.write(str(child.pid))",
+                    "    handle.flush()",
+                    "time.sleep(30)",
+                ]
+            )
+            started = time.perf_counter()
+            turn_elapsed = None
+            try:
+                with mock.patch.object(
+                    client,
+                    "build_claude_command",
+                    return_value=[sys.executable, "-c", script, str(pid_path)],
+                ), redirect_stderr(io.StringIO()):
+                    code, result, _ = client.run_turn(args, ".", "prompt", "session-1", False, 0.1, 0)
+                turn_elapsed = time.perf_counter() - started
+            finally:
+                if pid_path.exists():
+                    descendant_pid = int(pid_path.read_text(encoding="ascii"))
+                    if sys.platform.startswith("win"):
+                        subprocess.run(
+                            ["taskkill", "/PID", str(descendant_pid), "/F"],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        try:
+                            os.kill(descendant_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+        self.assertEqual(code, client.EXIT_TIMEOUT)
+        self.assertIsNone(result)
+        self.assertIsNotNone(turn_elapsed)
+        self.assertLess(turn_elapsed, client.PROCESS_CLEANUP_TIMEOUT + 0.8)
 
     def test_child_that_stays_alive_after_stdout_closes_is_reaped_on_timeout(self) -> None:
         args = parsed_args("--json", "prompt")

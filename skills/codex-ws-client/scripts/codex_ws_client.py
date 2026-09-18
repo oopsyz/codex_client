@@ -2451,6 +2451,9 @@ async def run_detached_turn(
         if inspect.isawaitable(result):
             await result
 
+    args._active_thread_id = thread_id
+    args._active_turn_id = ""
+    args._operation_phase = "starting_turn"
     turn = await client.request(
         "turn/start",
         make_turn_params(args, thread_id, cwd, prompt, resumed=bool(getattr(args, "_resumed", False))),
@@ -2458,6 +2461,8 @@ async def run_detached_turn(
     )
     turn_data = turn["turn"]
     turn_id = turn_data["id"]
+    args._active_turn_id = turn_id
+    args._operation_phase = "unsubscribing"
     turn_status = turn_data.get("status", "unknown")
     metrics = turn_metrics(turn_data)
     rotation = getattr(args, "rotation", None)
@@ -2465,7 +2470,10 @@ async def run_detached_turn(
         metrics["thread_decision"] = rotation.get("decision")
     unsubscribe = await client.unsubscribe_thread(thread_id, timeout=timeout)
     unsubscribe_status = str(unsubscribe.get("status", "unknown"))
+    args._operation_phase = "closing_connection"
     await _close_client()
+    args._active_turn_id = ""
+    args._operation_phase = "idle"
     return make_detach_result(
         thread_id,
         turn_id,
