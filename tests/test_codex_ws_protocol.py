@@ -1348,12 +1348,14 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
             args = parse_args()
         self.assertIsNone(args.sandbox)
 
-    def test_approval_policy_defaults_to_never(self) -> None:
+    def test_approval_policy_defaults_and_resume_approve_for_me_decision(self) -> None:
         with mock.patch.object(sys, "argv", ["codex_ws_client.py", "--sandbox", "read-only", "prompt"]):
             args = parse_args()
         self.assertEqual(effective_approval_policy(args), "never")
         self.assertEqual(make_thread_params(args, "C:/repo", "dev")["approvalPolicy"], "never")
         self.assertNotIn("approvalPolicy", make_turn_params(args, "thread-1", "C:/repo", "prompt"))
+        # Product decision: omission applies the automatic-review default; it
+        # does not claim to preserve unknown thread-owned approval state.
         resume = make_thread_params(args, "C:/repo", "dev", creation=False)
         self.assertEqual(resume["approvalPolicy"], "on-request")
         self.assertEqual(resume["approvalsReviewer"], "auto_review")

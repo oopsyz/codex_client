@@ -80,7 +80,10 @@ Persisted thread:
 - do not pass `--sandbox`; explicit `--permissions` is supported at turn start
 - omitted instructions and personality remain absent on ordinary resume; an
   omitted approval policy resolves to `approvalPolicy: on-request` with
-  `approvalsReviewer: auto_review` on resume and turn start
+  `approvalsReviewer: auto_review` on resume and turn start. This applies the
+  client’s approve-for-me automatic-review default; it does not preserve an
+  existing thread’s unknown approval configuration, which the client does not
+  inspect before resuming.
 - fresh creation retains `Answer concisely.`, `pragmatic`, and `never`
 - explicit instructions (including an empty string) are sent on thread
   start/resume only; personality and policy also apply at turn start
@@ -106,7 +109,9 @@ Interactive approvals:
   `--approval-policy` is supplied
 - other new threads default to `approvalPolicy: never`; ordinary resumes with
   no explicit policy use `approvalPolicy: on-request` and
-  `approvalsReviewer: auto_review` on resume and turn start
+  `approvalsReviewer: auto_review` on resume and turn start. That is the
+  client’s approve-for-me automatic-review default, not preservation of the
+  thread’s existing server-owned approval configuration.
 - noninteractive clients decline command/file approvals and grant no additional
   permissions, even when server policy is inherited or explicitly `on-request`
 - `--interactive-approvals` alone outside REPL does not enable prompts or grants

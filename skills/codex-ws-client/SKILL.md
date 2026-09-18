@@ -76,9 +76,11 @@ python .codex/skills/codex-ws-client/scripts/codex_ws_client.py --repl --sandbox
 `--interactive-approvals` selects the app-server `on-request` approval policy
 in REPL unless `--approval-policy` is supplied explicitly. Other new threads
 default to `never`; an ordinary resume defaults to `on-request` with the
-`auto_review` approvals reviewer (the approve-for-me behavior). Noninteractive
-approval requests that reach the client are still declined regardless of the
-inherited server policy.
+`auto_review` approvals reviewer (the explicit approve-for-me automatic-review
+default). This is not a preserve-existing-approval-configuration mode: the
+client does not inspect and replay the thread's server-owned policy/reviewer
+before resuming. Noninteractive approval requests that reach the client are
+still declined regardless of the inherited server policy.
 
 Resume a persisted thread:
 

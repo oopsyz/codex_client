@@ -303,7 +303,11 @@ resume with no explicit policy sends `approvalPolicy: on-request` and
 `approvalsReviewer: auto_review` on both resume and turn start. Fresh-thread
 turns omit an unselected policy. Noninteractive client approval requests are
 still declined; the server-side auto-reviewer handles only eligible requests.
-Inherited server policy is not client authorization to approve requests.
+This ordinary-resume behavior means “apply the client’s approve-for-me
+automatic-review default”; it is not a claim to preserve whatever approval
+configuration the existing thread already had. The client does not inspect
+and replay that server-owned configuration before resuming. Inherited server
+policy is not client authorization to approve requests.
 
 Prompt from file:
 

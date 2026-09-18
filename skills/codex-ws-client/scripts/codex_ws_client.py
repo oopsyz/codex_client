@@ -1796,7 +1796,11 @@ def effective_approval_policy(args: argparse.Namespace, *, creation: bool = True
 
 
 def effective_approvals_reviewer(args: argparse.Namespace, *, resumed: bool = False) -> str | None:
-    """Route the omitted resume policy to the app-server's approve-for-me reviewer."""
+    """Apply the omitted resume policy's approve-for-me default.
+
+    This deliberately does not claim to preserve a resumed thread's unknown
+    server-owned approval configuration; the client does not inspect it.
+    """
     if not resumed:
         return None
     if str(getattr(args, "approval_policy", "") or "").strip():

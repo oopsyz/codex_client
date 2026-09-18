@@ -127,7 +127,9 @@ python skills/codex-ws-client/scripts/codex_ws_client.py --json --project-id PRO
   但不会发送给 `thread/resume`；如需更改线程级权限策略，请创建新线程
 - 恢复持久线程且未显式指定 `--approval-policy` 时，`thread/resume` 和
   `turn/start` 会使用 `approvalPolicy: on-request` 与
-  `approvalsReviewer: auto_review`；沙箱选择仍保持独立
+  `approvalsReviewer: auto_review`；这是客户端应用“自动审批默认”的
+  approve-for-me 行为，不是保留线程已有审批配置的行为；客户端不会在
+  恢复前读取并重放服务端拥有的审批配置；沙箱选择仍保持独立
 
 持久化：
 
@@ -263,6 +265,8 @@ REPL 模式下可用：
 
 对于普通的非交互式恢复线程，服务端会对符合条件的审批请求使用
 `auto_review`；如果审批请求仍发送到客户端，非交互式客户端仍会拒绝它。
+这里的恢复默认表示应用客户端的 approve-for-me 自动审批策略，而不是
+保留线程原有的审批配置；客户端不会在恢复前查询并重放该服务端状态。
 
 REPL 覆盖行为：
 
