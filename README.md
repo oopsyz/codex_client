@@ -13,7 +13,7 @@ The script lives at `skills/codex-ws-client/scripts/codex_ws_client.py`.
 The same module exposes `BoundedClientProfile`, `BoundedAppServerClient`, and
 `open_bounded_client` for one-shot non-conversational consumers. That profile
 requires an explicit endpoint and request id, enforces finite deadlines and
-byte/notification limits, fails closed on unsupported messages, and returns
+per-frame byte limits (plus aggregate byte/notification quotas by default), fails closed on unsupported messages, and returns
 only correlated responses plus caller-approved sanitized notification
 classifications. See [the bounded adapter reference](skills/codex-ws-client/references/usage.md#bounded-reusable-adapter).
 
