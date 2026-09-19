@@ -2554,6 +2554,23 @@ def resolve_prompt(args: argparse.Namespace) -> str:
     return args.prompt or ""
 
 
+def websocket_close_message(exc: ConnectionClosed, max_size: int) -> str:
+    """Explain size-limit closures without confusing local and peer limits."""
+    if exc.sent is not None and exc.sent.code == 1009 and not exc.rcvd_then_sent:
+        return (
+            f"Incoming App Server WebSocket message exceeded the client's {max_size}-byte "
+            "limit (close code 1009). For thread history, omit --include-turns or use "
+            "--thread-turns THREAD_ID --turns-limit 1 to request a smaller page. "
+            f"Details: {exc}"
+        )
+    if exc.rcvd is not None and exc.rcvd.code == 1009:
+        return (
+            "App Server rejected an outgoing WebSocket message as too large "
+            f"(close code 1009; server-side limit). Details: {exc}"
+        )
+    return f"WebSocket connection lost: {exc}"
+
+
 async def run_client(args: argparse.Namespace) -> int:
     global _interactive_approvals_enabled
     args._active_thread_id = str(getattr(args, "thread_id", "") or "")
@@ -2909,8 +2926,9 @@ async def run_client(args: argparse.Namespace) -> int:
             return EXIT_TURN_FAILURE
         raise
     except ConnectionClosed as exc:
-        result = make_failure_result(args, kind="transport_closed", message=f"WebSocket connection lost: {exc}")
-        emit_failure(args, f"WebSocket connection lost: {exc}", result)
+        message = websocket_close_message(exc, connect_kwargs["max_size"])
+        result = make_failure_result(args, kind="transport_closed", message=message)
+        emit_failure(args, message, result)
         return EXIT_CONNECTION_FAILURE
     finally:
         if args.ndjson_file:

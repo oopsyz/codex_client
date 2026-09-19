@@ -264,6 +264,15 @@ Timeouts and transport failures in `--json` mode return a failure envelope with
 An unknown outcome means completion was not observed; callers should reconcile
 the persisted turn before retrying.
 
+The CLI's incoming WebSocket message limit is 8,000,000 bytes. If a response
+exceeds it, the error identifies the client-side limit and close code `1009`,
+and preserves the underlying size details when available. For large thread
+histories, omit `--include-turns` or request smaller pages with
+`--thread-turns THREAD_ID --turns-limit 1` (an individual large turn can still
+exceed the limit). A server-initiated `1009` is reported separately as an
+outgoing message rejected by the server. Both retain exit code `3` and JSON
+error kind `transport_closed`; no automatic retry or limit increase occurs.
+
 ## Useful Commands
 
 One-shot prompt:
