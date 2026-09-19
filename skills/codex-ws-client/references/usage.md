@@ -258,8 +258,8 @@ async with open_bounded_client(profile) as client:
 This API owns one explicit WebSocket connection and returns only the correlated
 response plus sanitized `NotificationObservation` values. It validates the
 current flattened `ServerNotificationEnvelope` (`method`, `params`, optional
-`emittedAtMs`), uses one shared request deadline, enforces frame/aggregate byte
-and notification-count limits, never retries or buffers unrelated messages,
+`emittedAtMs`), uses one shared request deadline, enforces per-frame byte limits
+and, by default, aggregate byte/notification-count limits, never retries or buffers unrelated messages,
 does not answer server requests, and does not write raw tracing output. The
 `attempt_timeout` starts at connection and covers initialization, requests, and
 cleanup. A request `deadline` is an absolute `time.monotonic()` deadline and
@@ -268,6 +268,36 @@ cannot renew the attempt budget. `initialize()` completes the source-valid
 validator is the only admission hook; callers retain responsibility for their
 own allowed-method and parameter policy. It does not select models, permission
 profiles, workspaces, or OA governance state, and ambient proxies are disabled.
+
+The default `notification_mode="collect"` applies `max_notifications` across
+the entire connection (default 8), and returns each request's sanitized
+observations in `BoundedRequestResult.notifications`. The count is not reset
+between requests.
+
+A subscribed observer that only needs correlated RPC results can explicitly
+select `BoundedClientProfile(..., notification_mode="drain")`. In this mode
+the adapter drains notifications interleaved while waiting for RPC responses;
+it does not add a background receive loop. It validates each notification's
+envelope, source/profile method
+allowlist, caller admission, and returned `NotificationObservation`, then
+discards the observation. It allocates no per-request notification list and
+always returns `notifications=()`. `max_notifications` and `max_total_bytes`
+remain validated positive-integer profile fields but are ignored only in drain
+mode: there is no connection-lifetime event-count or aggregate sent/received
+byte cutoff. Collect mode still enforces both quotas. This is not an unlimited
+connection: finite attempt/request deadlines and per-frame byte limits remain enforced.
+Notifications do not renew those budgets. No buffering, automatic retry,
+server-request handling, or raw tracing is enabled. Callers must avoid retaining
+payloads in their own validators; this mode does not constrain caller-owned state.
+
+Drain mode is an opt-in client-library capability, not an App Server protocol
+setting or a CLI switch. An older client does not support the new constructor
+argument; consumers requiring drain semantics must check support before any
+effects and must not silently fall back to collecting mode. Existing callers
+that omit the mode keep the original behavior and result shape. Earlier drain
+implementations still enforce the aggregate quota, so the mode field alone does
+not prove the newer behavior; use the exact validated client revision. This change
+does not depend on the separate notification-diagnostics candidate.
 
 ## Known limits
 
@@ -367,7 +397,8 @@ a reverse proxy and keep the gateway on loopback behind it.
 errors as `BoundedRpcError` with exact `rpc_response`, method, code, message and
 data. The connection stays open for caller-decided reads; the client never retries.
 Default behavior remains generic error plus close. Malformed envelopes, protocol
-errors, deadlines and frame/aggregate-byte/notification limits still fail closed.
+errors, deadlines and per-frame limits still fail closed. In collecting mode,
+aggregate-byte and notification limits also fail closed.
 An observed error consumes its request ID; use a fresh ID for each later request.
 Callers must retain diagnostic data privately and explicitly classify any bounded
 read retry. This seam does not authorize replay of task or turn creation.

@@ -654,7 +654,13 @@ def parse_server_notification_envelope(message: Mapping[str, Any]) -> ServerNoti
 
 @dataclass(frozen=True)
 class BoundedClientProfile:
-    """Explicit transport limits for one bounded App Server connection."""
+    """Explicit transport limits for one bounded App Server connection.
+
+    ``collect`` retains sanitized observations under a connection-wide count
+    cap. Opt-in ``drain`` validates notifications without collecting them or
+    applying lifetime count or aggregate-byte caps; finite time and per-frame
+    byte limits still apply.
+    """
 
     uri: str
     attempt_timeout: float = 60.0
@@ -670,8 +676,11 @@ class BoundedClientProfile:
         default=_SOURCE_SERVER_NOTIFICATION_METHODS, repr=False, compare=False
     )
     preserve_rpc_errors: bool = False
+    notification_mode: str = "collect"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.notification_mode, str) or self.notification_mode not in ("collect", "drain"):
+            raise ValueError("notification_mode must be collect or drain")
         if type(self.preserve_rpc_errors) is not bool:
             raise ValueError("preserve_rpc_errors must be boolean")
         parsed = urlparse(self.uri)
@@ -718,7 +727,8 @@ class BoundedAppServerClient:
         self._core = JsonRpcCore(
             ws,
             max_frame_bytes=profile.max_frame_bytes,
-            max_total_bytes=profile.max_total_bytes,
+            # Drain mode bounds individual frames and time, not lifetime traffic.
+            max_total_bytes=profile.max_total_bytes if profile.notification_mode == "collect" else None,
             trace=False,
         )
         self._closed = False
@@ -790,14 +800,15 @@ class BoundedAppServerClient:
         _ws: Any,
         message: dict[str, Any],
         _verbosity: int,
-        notifications: list[NotificationObservation],
+        notifications: list[NotificationObservation] | None,
     ) -> bool:
         envelope = parse_server_notification_envelope(message)
         if envelope.method not in self.profile.known_notification_methods:
             raise BoundedProtocolError("unknown App Server notification")
-        if self._notification_count >= self.profile.max_notifications:
-            raise BoundedProtocolError("App Server notification limit exceeded")
-        self._notification_count += 1
+        if self.profile.notification_mode == "collect":
+            if self._notification_count >= self.profile.max_notifications:
+                raise BoundedProtocolError("App Server notification limit exceeded")
+            self._notification_count += 1
         validator = self.profile.notification_validator
         if validator is None:
             raise BoundedProtocolError("App Server notification was not admitted")
@@ -809,7 +820,8 @@ class BoundedAppServerClient:
             raise BoundedProtocolError("App Server notification was rejected") from None
         if not isinstance(observation, NotificationObservation) or observation.method != envelope.method:
             raise BoundedProtocolError("notification validator returned an invalid observation")
-        notifications.append(observation)
+        if notifications is not None:
+            notifications.append(observation)
         return True
 
     async def send_initialized(self, *, deadline: float | None = None) -> None:
@@ -867,7 +879,9 @@ class BoundedAppServerClient:
         ):
             raise ValueError("deadline must be a finite positive number")
         budget = self._budget(deadline)
-        notifications: list[NotificationObservation] = []
+        notifications: list[NotificationObservation] | None = (
+            [] if self.profile.notification_mode == "collect" else None
+        )
         try:
             if request_id in self._reserved_request_ids:
                 raise BoundedProtocolError("duplicate App Server response id")
@@ -887,7 +901,7 @@ class BoundedAppServerClient:
                 rpc_error_factory=BoundedRpcError.from_payload if self.profile.preserve_rpc_errors else None,
                 include_jsonrpc=False,
             )
-            return BoundedRequestResult(result, tuple(notifications))
+            return BoundedRequestResult(result, tuple(notifications) if notifications is not None else ())
         except BoundedRpcError:
             raise
         except asyncio.CancelledError:
