@@ -256,6 +256,33 @@ validator is the only admission hook; callers retain responsibility for their
 own allowed-method and parameter policy. It does not select models, permission
 profiles, workspaces, or OA governance state, and ambient proxies are disabled.
 
+The default `notification_mode="collect"` applies `max_notifications` across
+the entire connection (default 8), and returns each request's sanitized
+observations in `BoundedRequestResult.notifications`. The count is not reset
+between requests.
+
+A subscribed observer that only needs correlated RPC results can explicitly
+select `BoundedClientProfile(..., notification_mode="drain")`. In this mode
+the adapter drains notifications interleaved while waiting for RPC responses;
+it does not add a background receive loop. It validates each notification's
+envelope, source/profile method
+allowlist, caller admission, and returned `NotificationObservation`, then
+discards the observation. It allocates no per-request notification list and
+always returns `notifications=()`. `max_notifications` remains a positive-integer
+profile field but is ignored only in drain mode: there is no lifetime event
+count cutoff. This is not an unlimited connection: finite attempt/request
+deadlines and frame/connection-wide aggregate byte limits remain enforced.
+Notifications do not renew those budgets. No buffering, automatic retry,
+server-request handling, or raw tracing is enabled. Callers must avoid retaining
+payloads in their own validators; this mode does not constrain caller-owned state.
+
+Drain mode is an opt-in client-library capability, not an App Server protocol
+setting or a CLI switch. An older client does not support the new constructor
+argument; consumers requiring drain semantics must check support before any
+effects and must not silently fall back to collecting mode. Existing callers
+that omit the mode keep the original behavior and result shape. This change
+does not depend on the separate notification-diagnostics candidate.
+
 ## Known limits
 
 - WebSocket only
