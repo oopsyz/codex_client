@@ -154,7 +154,7 @@ original inputs; do not create a replacement project or blindly retry.
 ### Protocol maintenance checks
 
 Run `python -B -m pytest tests -q`. The schema manifests are pinned to the
-Windows x64 npm CLI `@openai/codex` **0.154.0**, generated with
+Windows x64 npm CLI `@openai/codex` **0.163.0**, generated with
 `codex app-server generate-json-schema`; project-import schemas additionally
 use `--experimental`. See [schema provenance](docs/protocol-schema-baseline.md).
 The project-import tests exercise the CLI parser and client through a local

@@ -20,7 +20,7 @@ from websockets.exceptions import ConnectionClosed
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/codex-ws-client/scripts"))
 import codex_ws_client as client
 
-# npm @openai/codex 0.154.0 Windows x64, generate-json-schema --experimental.
+# npm @openai/codex 0.163.0 Windows x64, generate-json-schema --experimental.
 IMPORT_SCHEMA_MANIFEST = {
     "ProjectImportParams.json": "c26f8dd7b44d8a2881100c5f04b39328da71fca9b251b32f2e3fc830c6fe46c9",
     "ProjectImportResponse.json": "0d7ee068819bee4a6910a7aac7168963e1c99fdf0998de5f36f62f12473507d7",

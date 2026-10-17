@@ -1,15 +1,15 @@
-# Protocol schema baseline: CLI 0.154.0
+# Protocol schema baseline: CLI 0.163.0
 
-Verified 2026-09-12 against the current Windows x64 npm installation.
+Verified 2026-10-16 against the current Windows x64 npm installation.
 The [official App Server documentation](https://learn.chatgpt.com/docs/app-server)
 defines generated schemas as specific to the CLI version used to generate them.
 
 ## Exact source
 
-- Package: `@openai/codex` 0.154.0; `codex --version` reports `codex-cli 0.154.0`.
+- Package: `@openai/codex` 0.163.0; `codex --version` reports `codex-cli 0.163.0`.
 - Test command resolution: npm `codex.cmd`, then the package's Windows x64 binary,
   not the separately installed Desktop-bundled executable.
-- Binary SHA256: `be96b992178b1e467c225800da0d65f2c86d5eba1ef0b14632f65db381cbdfde`.
+- Binary SHA256: `2692c8c7bb2cf8b0aeef638741fc90236f4b824c59578ce84994f9de58200993`.
 - Standard generation: `codex app-server generate-json-schema --out <temporary-dir>`.
 - Experimental generation: same command with `--experimental`.
 - Hashing: parse JSON, serialize with sorted keys and separators `(',', ':')`,
@@ -17,25 +17,25 @@ defines generated schemas as specific to the CLI version used to generate them.
 
 The 17-file standard manifest in `tests/test_codex_ws_protocol.py` follows the
 installed CLI. `tests/test_project_import.py` separately pins the two experimental
-ProjectImport request/response schemas and validates wire fixture payloads.
-Future installation drift must fail these checks for explicit investigation;
-tests do not dynamically accept newly generated hashes.
+ProjectImport request/response schemas and validates wire fixture payloads. All
+17 standard hashes match the checked-in `rust-v0.163.0` source snapshot; the
+experimental schemas are pinned from CLI generation because the source tree does
+not check in experimental schema files. Future installation drift must fail these
+checks for explicit investigation; tests do not dynamically accept new hashes.
 
 ## Local reference comparison
 
-Read-only reference: sibling `codex`, commit
-`b1a547b1f73ce86205d9222ac19cff334b3b7a2e`. All 17 prior manifest hashes matched
-that checkout's `codex-rs/app-server-protocol/schema/json` snapshot. Nine differ
-from the installed CLI: ClientRequest, ServerNotification, ServerRequest,
-ThreadListParams/Response, ThreadReadResponse, ThreadResumeParams/Response and
-ThreadStartResponse. The other eight match. The reference was not changed and
-is not claimed to be byte-identical to the installed release.
-
-Observed changes include thread originator fields/filtering, reasoning
-configuration history, thread environment definitions, and use of
-LegacyAppPathString in permission-request cwd. Existing client payload tests
-remain valid against the installed schemas. No client model, permission or
-thread/turn policy change is inferred from this schema alignment.
+Read-only reference: sibling `codex`, tag `rust-v0.163.0`, commit
+`83086188ae0614bd882818ff1aa23f3194962012`. All 17 standard manifest hashes
+match that checkout's `codex-rs/app-server-protocol/schema/json` snapshot. The
+experimental ProjectImport schemas are not checked into that source snapshot.
+Compared with the previous
+0.154.0 baseline, 12 of the 17 standard schemas changed; the remaining five
+matched. Changes relevant to this client include additional thread-list filters
+and response metadata, thread lineage fields, file-ID image input support, and
+four new standard notifications. `thread/rollback` was removed, and this client
+does not call it. Existing request payloads remain valid; the notification
+allowlist now recognizes the four added notifications.
 
 The reference source independently supports project/import:
 

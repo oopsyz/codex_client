@@ -67,26 +67,26 @@ from codex_ws_client import (  # noqa: E402
 )
 import codex_ws_client as client_module  # noqa: E402
 
-# Pinned from npm @openai/codex 0.154.0 (Windows x64), 2026-09-12.
+# Pinned from npm @openai/codex 0.163.0 (Windows x64), 2026-10-16.
 # generate-json-schema without --experimental; hashes normalize parsed JSON.
-# ../codex b1a547b1f73ce86205d9222ac19cff334b3b7a2e has the older snapshot.
+# ../codex rust-v0.163.0 (83086188ae0614bd882818ff1aa23f3194962012) matches.
 SCHEMA_MANIFEST = {
   "ClientNotification.json": "4446a1ae8626aa55d812836bfc2dae24213500d87c4759af2698f6199ea5b59f",
-  "ClientRequest.json": "54f2e82388544ced959e8a20d655ae7921756859ad1b30368da581451878c34c",
+  "ClientRequest.json": "e8dec0e0f00ecc2c3c841e104605723265962b28ef2a66d75fbd92f3da7a0b35",
   "JSONRPCError.json": "8835db6c4ada12ec628613fe2f571edc2c8fb55fc31bac706085e25ad1a08c0e",
-  "ServerNotification.json": "e268e1eb11f90d13744753ad1685ec99f64d731afaca32edb8508d85297bca4a",
+  "ServerNotification.json": "bd458199850017e410b3f8ad86c49a7da0d8f3d34c60e98424f52fceef5003f8",
   "ServerRequest.json": "c3d046f059f8e3ffba0b3f198e127715ea0c6556225d6e128879ca8f9c70f592",
-  "v2/ThreadListParams.json": "5e5cb38ddd9b54cd1b387de6104c2a61f505a3a924e090697be4c62009bf4666",
-  "v2/ThreadListResponse.json": "8cf369e1e2fdd796548228618880ab3188764e54c6193d0d0a37da4487243fa2",
+  "v2/ThreadListParams.json": "ed4a821ea4ce18f1b9868b2669fda34a49c306c3485f9866402679b3cc62d0d8",
+  "v2/ThreadListResponse.json": "631d291f027a9986a7083bb941be41f29cb8981aee5897fd40be8056273ed470",
   "v2/ThreadReadParams.json": "034ae7f41fe195edb1010ab8927ac4215caacabbf24f15da96170f604aacb901",
-  "v2/ThreadReadResponse.json": "016bdd5c625f087c64a0874ab4f448bca0f9dadbe49eea59f5cd9b7394032c78",
-  "v2/ThreadResumeParams.json": "67b1b0dc5c4cc3cbc9ff06ad3a7b7d99c4063b3ffc1d8608d35ab3a4897fa3d4",
-  "v2/ThreadResumeResponse.json": "daed3e19cbc3d719076314dbb907861dcae8f97521d90d51d0e9affd7999695e",
-  "v2/ThreadStartParams.json": "278d25b0c1771eafc2e0bdaac84c5bbc2cfbd30cc4b1feb15511a74385b0ec95",
-  "v2/ThreadStartResponse.json": "5f12184b5b04bedec229b3c83b2879e37f865abf43f66c52bdc32d82403261c6",
-  "v2/TurnStartParams.json": "8a29a6fb75c063013567a01133fc4db4052771d22d3c88b634506f2a763df835",
-  "v2/TurnStartResponse.json": "964fac59b8e94f4139d9091b6495da2e82a6cc1939f91c5669c8320fd53234d3",
-  "v2/TurnSteerParams.json": "18daa1fcfb60873beb1e1b132e142acf9812b21d69c8ef7ea7803bb748f10df7",
+  "v2/ThreadReadResponse.json": "ab2a9069efb93be0394e918aa3193f023fa2387679a6fe31763186e3ddce4692",
+  "v2/ThreadResumeParams.json": "e8689b1824a3afceb788c084beb6f00fd6dea97e919e5811fc691f6b919754c8",
+  "v2/ThreadResumeResponse.json": "155dd16b6c62b965e784a1ae344fd66c83984e643036480ebc0d332548039681",
+  "v2/ThreadStartParams.json": "b8ad6ed976c6e0f5169f486ce591971a86595fb89fab1745c6fc1c9983781b24",
+  "v2/ThreadStartResponse.json": "7c9e93430e2086e24ef8a7c46428bb7956b98b7f62860d04b882fe87864de2ac",
+  "v2/TurnStartParams.json": "75d5932aca5d40bc64b09e41cc6102cf3aaa94d71e7d4139f8f3f33c8eaf3eb3",
+  "v2/TurnStartResponse.json": "f42d949843302fc60feacfd29744ecd85456681c16c3e8f495d21e38194af693",
+  "v2/TurnSteerParams.json": "1769b06f568e0df3bbec3528901eabbc1b0968a1ecac21f2356834ca5ce3c787",
   "v2/TurnSteerResponse.json": "c0cee0b0c57af980fe2727679fbf2d3110ba28e8c9328f40d402fcc44ecb87bf"
 }
 
@@ -465,6 +465,17 @@ class BoundedAdapterTests(unittest.IsolatedAsyncioTestCase):
             parse_server_notification_envelope({"jsonrpc": "2.0", "method": "configWarning", "params": {}})
         with self.assertRaises(BoundedProtocolError):
             parse_server_notification_envelope({"method": "configWarning", "params": {}, "emittedAtMs": True})
+
+    def test_v0163_server_notifications_are_recognized(self) -> None:
+        methods = (
+            "account/gatewayOAuth/changed",
+            "thread/attachment/updated",
+            "thread/prediction/updated",
+            "thread/readState/changed",
+        )
+        for method in methods:
+            envelope = parse_server_notification_envelope({"method": method, "params": {}})
+            self.assertEqual(envelope.method, method)
 
     def test_bounded_profile_rejects_uri_credentials(self) -> None:
         with self.assertRaisesRegex(ValueError, "credentials"):

@@ -501,6 +501,7 @@ class JsonRpcCore:
 _SOURCE_SERVER_NOTIFICATION_METHODS = frozenset(
     {
         "account/login/completed",
+        "account/gatewayOAuth/changed",
         "account/rateLimits/updated",
         "account/updated",
         "app/list/updated",
@@ -548,6 +549,7 @@ _SOURCE_SERVER_NOTIFICATION_METHODS = frozenset(
         "serverRequest/resolved",
         "skills/changed",
         "thread/archived",
+        "thread/attachment/updated",
         "thread/closed",
         "thread/compacted",
         "thread/deleted",
@@ -556,8 +558,10 @@ _SOURCE_SERVER_NOTIFICATION_METHODS = frozenset(
         "thread/goal/cleared",
         "thread/goal/updated",
         "thread/name/updated",
+        "thread/prediction/updated",
         "thread/project/updated",
         "thread/queue/changed",
+        "thread/readState/changed",
         "thread/realtime/closed",
         "thread/realtime/error",
         "thread/realtime/item/completed",
