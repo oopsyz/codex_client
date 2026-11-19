@@ -71,6 +71,48 @@ class DrainTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                     client.BoundedClientProfile("ws://offline.invalid", notification_mode="drain", **{field: value})
 
+    async def test_read_state_before_turn_completed_and_correlated_reply(self):
+        for mode in ("collect", "drain"):
+            for first_unread in (None, {"type": "turn", "turnId": "turn-1"}):
+                with self.subTest(mode=mode, first_unread=first_unread):
+                    read_state = event(
+                        "thread/readState/changed",
+                        params={
+                            "threadId": "thread-1",
+                            "readState": {"revision": "opaque-revision-1", "firstUnread": first_unread},
+                        },
+                        emittedAtMs=1_795_046_400_000,
+                    )
+                    turn = {"id": "turn-1", "status": "completed", "items": [], "error": None}
+                    completed = event("turn/completed", params={"threadId": "thread-1", "turn": turn})
+                    reply = {"thread": {"id": "thread-1", "turns": [turn]}}
+                    validator = mock.Mock(side_effect=admit)
+                    bounded, wire = self.make_client(
+                        [read_state, completed, {"id": "read-1", "result": reply}],
+                        notification_mode=mode,
+                        notification_validator=validator,
+                    )
+
+                    result = await bounded.request("thread/read", {"threadId": "thread-1"}, request_id="read-1")
+
+                    self.assertEqual(result.result, reply)  # Neither notification completes the RPC.
+                    envelopes = [call.args[0] for call in validator.call_args_list]
+                    self.assertEqual([envelope.method for envelope in envelopes],
+                                     ["thread/readState/changed", "turn/completed"])
+                    self.assertEqual(envelopes[0].params, read_state["params"])
+                    self.assertEqual(envelopes[0].emitted_at_ms, read_state["emittedAtMs"])
+                    self.assertEqual(envelopes[1].params, completed["params"])
+                    self.assertEqual(result.notifications, (
+                        client.NotificationObservation("thread/readState/changed", "admitted"),
+                        client.NotificationObservation("turn/completed", "admitted"),
+                    ) if mode == "collect" else ())
+                    self.assertEqual(wire.received, 3)
+                    self.assertEqual(wire.sent, [{
+                        "id": "read-1", "method": "thread/read", "params": {"threadId": "thread-1"},
+                    }])  # No notification response, replay, or reconciliation request.
+                    self.assertIsNone(bounded._core.pending_messages)
+                    self.assertFalse(wire.closed)
+
     async def test_more_than_256_one_rpc_and_across_rpcs_without_retained_observations(self):
         for batches in ((600,), (200, 200, 200)):
             with self.subTest(batches=batches):
