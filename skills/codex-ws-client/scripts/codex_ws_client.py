@@ -574,6 +574,8 @@ _SOURCE_SERVER_NOTIFICATION_METHODS = frozenset(
         "thread/realtime/transcript/delta",
         "thread/realtime/transcript/done",
         "thread/reverted",
+        "thread/search/partial",
+        "thread/section/changed",
         "thread/settings/updated",
         "thread/started",
         "thread/status/changed",

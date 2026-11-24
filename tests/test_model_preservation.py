@@ -6,7 +6,6 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import time
@@ -15,6 +14,8 @@ from unittest import mock
 
 from jsonschema import validate
 from websockets.asyncio.server import serve
+
+from app_server_schema import generate_schema
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/codex-ws-client/scripts"))
 import codex_ws_client as client
@@ -25,8 +26,7 @@ class ModelPreservationTests(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.schema_dir = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.schema_dir.cleanup)
-        subprocess.run(["cmd", "/c", "codex", "app-server", "generate-json-schema",
-                        "--experimental", "--out", cls.schema_dir.name], check=True, capture_output=True)
+        generate_schema(Path(cls.schema_dir.name), experimental=True)
         root = Path(cls.schema_dir.name) / "v2"
         cls.schemas = {
             method: json.loads((root / name).read_text(encoding="utf-8"))

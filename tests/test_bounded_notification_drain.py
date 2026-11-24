@@ -55,6 +55,41 @@ class DrainTests(unittest.IsolatedAsyncioTestCase):
         )
         return bounded, wire
 
+    async def test_desktop_search_and_section_notifications_require_caller_admission(self):
+        frames = (
+            event("thread/section/changed", params={"threadId": "thread-1", "sectionId": None}),
+            event("thread/search/partial", params={"requestId": "search-1", "data": []}),
+        )
+        for mode in ("collect", "drain"):
+            with self.subTest(mode=mode):
+                validator = mock.Mock(side_effect=admit)
+                reply = {"thread": {"id": "thread-1"}}
+                bounded, wire = self.make_client(
+                    [*frames, {"id": 1, "result": reply}],
+                    notification_mode=mode,
+                    notification_validator=validator,
+                )
+                result = await bounded.request("thread/read", {"threadId": "thread-1"}, request_id=1)
+                self.assertEqual(result.result, reply)
+                envelopes = [call.args[0] for call in validator.call_args_list]
+                self.assertEqual([(e.method, e.params) for e in envelopes],
+                                 [(frame["method"], frame["params"]) for frame in frames])
+                self.assertEqual(result.notifications,
+                                 tuple(map(admit, envelopes)) if mode == "collect" else ())
+                self.assertFalse(wire.closed)
+
+            for frame in frames:
+                for overrides, error in (
+                    ({"notification_validator": None}, "was not admitted"),
+                    ({"notification_validator": mock.Mock(side_effect=ValueError)}, "was rejected"),
+                    ({"known_notification_methods": frozenset({"item/started"})}, "unknown"),
+                ):
+                    with self.subTest(mode=mode, method=frame["method"], error=error):
+                        bounded, wire = self.make_client([frame], notification_mode=mode, **overrides)
+                        with self.assertRaisesRegex(client.BoundedProtocolError, error):
+                            await bounded.request("thread/read", {}, request_id=1)
+                        self.assertTrue(wire.closed)
+
     def test_mode_is_explicit_strict_and_preserves_default_profile(self):
         default = client.BoundedClientProfile("ws://offline.invalid")
         self.assertEqual(default.notification_mode, "collect")
