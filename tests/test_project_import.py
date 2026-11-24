@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,13 +16,15 @@ from jsonschema import validate
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
+from app_server_schema import generate_schema
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/codex-ws-client/scripts"))
 import codex_ws_client as client
 
-# npm @openai/codex 0.163.0 Windows x64, generate-json-schema --experimental.
+# Codex Desktop 0.171.0-alpha.13.2 (Windows x64), experimental schema.
 IMPORT_SCHEMA_MANIFEST = {
     "ProjectImportParams.json": "c26f8dd7b44d8a2881100c5f04b39328da71fca9b251b32f2e3fc830c6fe46c9",
-    "ProjectImportResponse.json": "0d7ee068819bee4a6910a7aac7168963e1c99fdf0998de5f36f62f12473507d7",
+    "ProjectImportResponse.json": "9c507a75a06df39c0b9ac6d96ea2a5b104ad536e3cd78bb293f4394993759950",
 }
 
 
@@ -33,10 +34,7 @@ class ProjectImportEndToEndTests(unittest.IsolatedAsyncioTestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.tmp.cleanup)
         root = Path(cls.tmp.name)
-        subprocess.run(
-            ["cmd", "/c", "codex", "app-server", "generate-json-schema",
-             "--experimental", "--out", str(root)], check=True,
-        )
+        generate_schema(root, experimental=True)
         cls.schemas = {
             name: json.loads((root / "v2" / name).read_text(encoding="utf-8"))
             for name in IMPORT_SCHEMA_MANIFEST
@@ -60,7 +58,7 @@ class ProjectImportEndToEndTests(unittest.IsolatedAsyncioTestCase):
             code = await asyncio.wait_for(client.run_client(args), timeout=5)
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_exact_installed_import_schema_pins(self):
+    def test_exact_desktop_import_schema_pins(self):
         for name, expected in IMPORT_SCHEMA_MANIFEST.items():
             encoded = json.dumps(self.schemas[name], sort_keys=True, separators=(",", ":")).encode()
             self.assertEqual(hashlib.sha256(encoded).hexdigest(), expected, name)
@@ -70,7 +68,7 @@ class ProjectImportEndToEndTests(unittest.IsolatedAsyncioTestCase):
         response = {"project": {
             "id": "project-fixture", "name": "Imported",
             "roots": [{"path": "/srv/project"}], "metadata": {"owner": "test"},
-            "position": 0, "createdAt": 1, "updatedAt": 1, "recencyAt": None,
+            "createdAt": 1, "updatedAt": 1, "recencyAt": None,
         }}
         validate(response, self.schemas["ProjectImportResponse.json"])
 

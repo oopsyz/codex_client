@@ -17,6 +17,8 @@ from time import monotonic
 from jsonschema import validate
 from types import SimpleNamespace
 
+from app_server_schema import generate_schema
+
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "skills" / "codex-ws-client" / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -67,26 +69,25 @@ from codex_ws_client import (  # noqa: E402
 )
 import codex_ws_client as client_module  # noqa: E402
 
-# Pinned from npm @openai/codex 0.163.0 (Windows x64), 2026-10-16.
-# generate-json-schema without --experimental; hashes normalize parsed JSON.
-# ../codex rust-v0.163.0 (83086188ae0614bd882818ff1aa23f3194962012) matches.
+# Codex Desktop 0.171.0-alpha.13.2 (Windows x64), standard schema.
+# See docs/protocol-schema-baseline.md for provenance and hash normalization.
 SCHEMA_MANIFEST = {
   "ClientNotification.json": "4446a1ae8626aa55d812836bfc2dae24213500d87c4759af2698f6199ea5b59f",
-  "ClientRequest.json": "e8dec0e0f00ecc2c3c841e104605723265962b28ef2a66d75fbd92f3da7a0b35",
+  "ClientRequest.json": "233dbf14d5064d7b749247d3770af44e2c82a9e249684c2444c5e90600fc6fc9",
   "JSONRPCError.json": "8835db6c4ada12ec628613fe2f571edc2c8fb55fc31bac706085e25ad1a08c0e",
-  "ServerNotification.json": "bd458199850017e410b3f8ad86c49a7da0d8f3d34c60e98424f52fceef5003f8",
-  "ServerRequest.json": "c3d046f059f8e3ffba0b3f198e127715ea0c6556225d6e128879ca8f9c70f592",
-  "v2/ThreadListParams.json": "ed4a821ea4ce18f1b9868b2669fda34a49c306c3485f9866402679b3cc62d0d8",
-  "v2/ThreadListResponse.json": "631d291f027a9986a7083bb941be41f29cb8981aee5897fd40be8056273ed470",
+  "ServerNotification.json": "e3ab33ab663d9777847e82ee848811010e15aec378ccecd11874e840b5df5b8e",
+  "ServerRequest.json": "ab60b94815a1e10782d39e75ebb1425bc2cb0b22bbc800fa397452bfa5cb85ef",
+  "v2/ThreadListParams.json": "9aed7277dac34b9ede64ce82105c83a25ca11c051b40a9ccf9183f5ef4753e05",
+  "v2/ThreadListResponse.json": "4936215c5c03c66971d29ef88c5367be9c01917ed62154d12d9b4cb8049c0635",
   "v2/ThreadReadParams.json": "034ae7f41fe195edb1010ab8927ac4215caacabbf24f15da96170f604aacb901",
-  "v2/ThreadReadResponse.json": "ab2a9069efb93be0394e918aa3193f023fa2387679a6fe31763186e3ddce4692",
-  "v2/ThreadResumeParams.json": "e8689b1824a3afceb788c084beb6f00fd6dea97e919e5811fc691f6b919754c8",
-  "v2/ThreadResumeResponse.json": "155dd16b6c62b965e784a1ae344fd66c83984e643036480ebc0d332548039681",
+  "v2/ThreadReadResponse.json": "4d320d9a805b8088f7b95630e31c4afd327cc84df5630decb20da72e9c14e7bf",
+  "v2/ThreadResumeParams.json": "a6950f4de2e77dad09308f49342b4d399ac4713b3c8fc5f855caf9c606b98c13",
+  "v2/ThreadResumeResponse.json": "d2927e9bd01d4468d01338ea032e4ebb8888ce184d8fa66bd146cdcb0b5966c4",
   "v2/ThreadStartParams.json": "b8ad6ed976c6e0f5169f486ce591971a86595fb89fab1745c6fc1c9983781b24",
-  "v2/ThreadStartResponse.json": "7c9e93430e2086e24ef8a7c46428bb7956b98b7f62860d04b882fe87864de2ac",
-  "v2/TurnStartParams.json": "75d5932aca5d40bc64b09e41cc6102cf3aaa94d71e7d4139f8f3f33c8eaf3eb3",
-  "v2/TurnStartResponse.json": "f42d949843302fc60feacfd29744ecd85456681c16c3e8f495d21e38194af693",
-  "v2/TurnSteerParams.json": "1769b06f568e0df3bbec3528901eabbc1b0968a1ecac21f2356834ca5ce3c787",
+  "v2/ThreadStartResponse.json": "b462072b1d6c7d95e4cd52afea88d09fa31a48da025b29fa238cdc1df8c2e034",
+  "v2/TurnStartParams.json": "66083d09a3ab26272667732f9d1ce67b924b5f5b015c03bdc9153b53fd9ce73d",
+  "v2/TurnStartResponse.json": "02e0665e1d380f415bb2e4806e7e75e3b3260d2e05ab9d98c7f538f178d6ab69",
+  "v2/TurnSteerParams.json": "417b6b46b44b7ec5f48bd02b34737b3f451b4662ad5e08110dab919a2d635c23",
   "v2/TurnSteerResponse.json": "c0cee0b0c57af980fe2727679fbf2d3110ba28e8c9328f40d402fcc44ecb87bf"
 }
 
@@ -2042,17 +2043,21 @@ class ProtocolClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["commentary"], "progress")
         self.assertEqual([item["id"] for item in result["messages"]], ["commentary", "final"])
 
-    def test_generated_schema_manifest_matches_installed_codex(self) -> None:
+    def test_generated_schema_manifest_matches_desktop_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             schema_dir = Path(tmpdir)
-            subprocess.run(["cmd", "/c", "codex", "app-server", "generate-json-schema", "--out", str(schema_dir)], check=True)
+            generate_schema(schema_dir)
             for rel_path, expected_hash in SCHEMA_MANIFEST.items():
                 self.assertEqual(_hash_schema(schema_dir / rel_path), expected_hash, rel_path)
+            notifications = json.loads((schema_dir / "ServerNotification.json").read_bytes())
+            methods = {variant["properties"]["method"]["enum"][0] for variant in notifications["oneOf"]}
+            recognized = BoundedClientProfile("ws://offline.invalid").known_notification_methods
+            self.assertEqual(methods - recognized, set(), "unrecognized Desktop notifications")
 
-    def test_schema_payloads_validate_against_installed_codex_bundle(self) -> None:
+    def test_schema_payloads_validate_against_desktop_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             schema_dir = Path(tmpdir)
-            subprocess.run(["cmd", "/c", "codex", "app-server", "generate-json-schema", "--out", str(schema_dir)], check=True)
+            generate_schema(schema_dir)
             with (schema_dir / "v2" / "ThreadListParams.json").open("r", encoding="utf-8") as fh:
                 thread_list_schema = json.load(fh)
             with (schema_dir / "v2" / "ThreadUnsubscribeParams.json").open("r", encoding="utf-8") as fh:
