@@ -312,11 +312,19 @@ resume with no explicit policy sends `approvalPolicy: on-request` and
 `approvalsReviewer: auto_review` on both resume and turn start. Fresh-thread
 turns omit an unselected policy. Noninteractive client approval requests are
 still declined; the server-side auto-reviewer handles only eligible requests.
-This ordinary-resume behavior means “apply the client’s approve-for-me
-automatic-review default”; it is not a claim to preserve whatever approval
-configuration the existing thread already had. The client does not inspect
-and replay that server-owned configuration before resuming. Inherited server
-policy is not client authorization to approve requests.
+
+To use a saved task's App Server settings, pass its task ID, canonical project
+ID, and canonical absolute provider working directory:
+
+```powershell
+python skills/codex-ws-client/scripts/codex_ws_client.py --thread-id TASK_ID --preserve-existing-task-settings --expect-project-id PROJECT_ID --expect-cwd /srv/project --json "Continue the saved task"
+```
+
+The expected project and path are local assertions. The client compares them
+and the task ID with the resume response before sending the prompt. A mismatch
+exits with code 2. Both requests leave settings selection to the App Server.
+This mode rejects settings overrides, REPL, and nonzero resume TTL. It relies
+on App Server returning the saved task's `thread.projectId` and `thread.cwd`.
 
 Prompt from file:
 
