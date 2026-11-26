@@ -16,7 +16,7 @@ import sys
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import monotonic
 from typing import Any, Awaitable, Callable, Mapping
 from urllib.parse import urlparse
@@ -1696,6 +1696,10 @@ def make_thread_params(
     exclude_turns: bool = False,
     creation: bool = True,
 ) -> dict[str, Any]:
+    if getattr(args, "preserve_existing_task_settings", False):
+        if creation:
+            raise ValueError("Preserving existing task settings requires resuming a saved task.")
+        return {"excludeTurns": True}
     params: dict[str, Any] = {}
     policy = effective_approval_policy(args, creation=creation)
     if policy is not None:
@@ -2004,6 +2008,10 @@ def make_turn_params(
         "threadId": thread_id,
         "input": [{"type": "text", "text": prompt}],
     }
+    if getattr(args, "output_schema", ""):
+        params["outputSchema"] = json.loads(args.output_schema)
+    if getattr(args, "preserve_existing_task_settings", False):
+        return params
     policy = effective_turn_approval_policy(args, resumed=resumed)
     if policy is not None:
         params["approvalPolicy"] = policy
@@ -2028,8 +2036,6 @@ def make_turn_params(
         # turn/start. This is required when runtimeWorkspaceRoots are rebound
         # for a persisted thread; the selector is not sent to thread/resume.
         params["permissions"] = permissions
-    if getattr(args, "output_schema", ""):
-        params["outputSchema"] = json.loads(args.output_schema)
     return params
 
 
@@ -2081,6 +2087,39 @@ def sandbox_validation_error(args: argparse.Namespace, inspection_operation: boo
     if bool(sandbox) == bool(permissions):
         return "exactly one of --sandbox or --permissions is required when creating a new prompt thread."
     return None
+
+
+def validate_existing_task_args(args: argparse.Namespace, inspection_operation: bool) -> None:
+    expected_cwd = getattr(args, "expect_cwd", None)
+    expected_project = getattr(args, "expect_project_id", None)
+    if not getattr(args, "preserve_existing_task_settings", False):
+        if expected_cwd is not None or expected_project is not None:
+            raise ValueError("--expect-cwd and --expect-project-id require --preserve-existing-task-settings.")
+        return
+    if inspection_operation or not args.thread_id.strip() or args.thread_id != args.thread_id.strip():
+        raise ValueError("--preserve-existing-task-settings requires a saved --thread-id for prompt dispatch.")
+    if not expected_project or expected_project != expected_project.strip():
+        raise ValueError("--preserve-existing-task-settings requires a nonempty --expect-project-id.")
+    # Interpret the provider's path lexically, without resolving it on the client host.
+    raw_path = expected_cwd or ""
+    if raw_path.startswith("/") and not raw_path.startswith("//"):
+        path = PurePosixPath(raw_path)
+    else:
+        raw_path = raw_path.replace("/", "\\")
+        path = PureWindowsPath(raw_path)
+    if not path.is_absolute() or ".." in path.parts or str(path) != raw_path or "\0" in raw_path:
+        raise ValueError("--expect-cwd must be a canonical absolute provider path.")
+    conflicts = {
+        "--cwd": args.cwd, "--project-id": args.project_id, "--permissions": args.permissions,
+        "--sandbox": args.sandbox, "--approval-policy": args.approval_policy,
+        "--runtime-workspace-root": args.runtime_workspace_root, "--repl": args.repl,
+        "--interactive-approvals": args.interactive_approvals, "--ephemeral": args.ephemeral,
+        "--resume-ttl": args.resume_ttl != 0, "--model": args.model, "--effort": args.effort,
+        "--personality": args.personality is not None, "--instructions": args.instructions is not None,
+    }
+    for flag, enabled in conflicts.items():
+        if enabled:
+            raise ValueError(f"{flag} conflicts with --preserve-existing-task-settings.")
 
 
 def active_turn_ids(thread_response: Mapping[str, Any]) -> list[str]:
@@ -2195,6 +2234,7 @@ async def ensure_thread(
     *,
     force_new: bool = False,
 ) -> tuple[str, bool]:
+    preserve_settings = getattr(args, "preserve_existing_task_settings", False)
     rotation_reason = "forced_new_thread" if force_new else "resume_ttl_exceeded"
     if args.thread_id and not force_new:
         resume_ttl = float(getattr(args, "resume_ttl", 0) or 0)
@@ -2242,7 +2282,20 @@ async def ensure_thread(
             creation=False,
         )
         params["threadId"] = args.thread_id
-        result = await client.resume_thread(params, resume_timeout)
+        if preserve_settings:
+            result = await client.request("thread/resume", params, timeout=resume_timeout, retry_overload=False)
+            thread = result.get("thread") if isinstance(result, Mapping) else None
+            if (
+                not isinstance(thread, Mapping)
+                or thread.get("id") != args.thread_id
+                or thread.get("projectId") != args.expect_project_id
+                or thread.get("cwd") != args.expect_cwd
+                or result.get("cwd", args.expect_cwd) != args.expect_cwd
+                or thread.get("ephemeral", False) is not False
+            ):
+                raise ValueError("The resumed task does not match the expected task, project, and working directory.")
+        else:
+            result = await client.resume_thread(params, resume_timeout)
         status = result.get("thread", {}).get("status", {})
         status_type = status.get("type") if isinstance(status, dict) else status
         if status_type in {"systemError", "notLoaded"}:
@@ -2288,11 +2341,13 @@ async def run_turn(
         turn_idle_seconds = max(0.0, started_at - previous_completed)
 
     try:
+        request_options = {"retry_overload": False} if getattr(args, "preserve_existing_task_settings", False) else {}
         turn = await client.request(
             "turn/start",
             make_turn_params(args, thread_id, cwd, prompt, resumed=bool(getattr(args, "_resumed", False))),
             timeout=timeout,
             deadline=deadline,
+            **request_options,
         )
         turn_id = turn["turn"]["id"]
         args._active_turn_id = turn_id
@@ -2474,10 +2529,12 @@ async def run_detached_turn(
     args._active_thread_id = thread_id
     args._active_turn_id = ""
     args._operation_phase = "starting_turn"
+    request_options = {"retry_overload": False} if getattr(args, "preserve_existing_task_settings", False) else {}
     turn = await client.request(
         "turn/start",
         make_turn_params(args, thread_id, cwd, prompt, resumed=bool(getattr(args, "_resumed", False))),
         timeout=timeout,
+        **request_options,
     )
     turn_data = turn["turn"]
     turn_id = turn_data["id"]
@@ -2639,6 +2696,11 @@ async def run_client(args: argparse.Namespace) -> int:
             args.set_thread_name,
         )
     )
+    try:
+        validate_existing_task_args(args, inspection_operation)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_BAD_ARGS
     if args.detach and inspection_operation:
         print("Cannot use --detach with inspection or thread-management commands.", file=sys.stderr)
         return EXIT_BAD_ARGS
@@ -2985,6 +3047,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instructions", default=None, help="Explicit developer instructions for thread start/resume; new threads default to 'Answer concisely.', resume preserves omission.")
     parser.add_argument("--ephemeral", action="store_true")
     parser.add_argument("--thread-id", default="")
+    parser.add_argument(
+        "--preserve-existing-task-settings", action="store_true",
+        help="Resume a saved --thread-id without settings overrides. Requires --expect-cwd and --expect-project-id.",
+    )
+    parser.add_argument("--expect-cwd", help="Assert the saved task's canonical absolute provider working directory.")
+    parser.add_argument("--expect-project-id", help="Assert the saved task's App Server project ID.")
     parser.add_argument(
         "--project-id",
         default="",
